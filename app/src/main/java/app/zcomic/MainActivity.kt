@@ -19,6 +19,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
@@ -178,7 +182,7 @@ private fun ShelfScreen(books: List<VolumeRecord>, onGroup: (String) -> Unit,
     var addMenuExpanded by remember { mutableStateOf(false) }
     var deletingGroup by remember { mutableStateOf<List<VolumeRecord>?>(null) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Header("书架") {
+        Header("书架", actionModifier = Modifier.offset(x = 12.dp)) {
             Box {
                 IconButton(onClick = { addMenuExpanded = true }) { Icon(Icons.Outlined.Add, "添加") }
                 DropdownMenu(expanded = addMenuExpanded, onDismissRequest = { addMenuExpanded = false }) {
@@ -271,20 +275,29 @@ private fun DiscoverScreen(comics: List<OnlineComic>, query: String, selectedSor
     onSearch: () -> Unit, onSort: (ComicSort) -> Unit, onComic: (OnlineComic) -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Header("发现")
-        OutlinedTextField(query, onQuery, singleLine = true,
-            modifier = Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Outlined.Search, "搜索漫画") },
-            trailingIcon = {
-                IconButton(onClick = onSearch, enabled = query.isNotBlank()) { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "搜索") }
-            }, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { if (query.isNotBlank()) onSearch() }))
+        Surface(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+            Row(Modifier.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Search, null, modifier = Modifier.padding(start = 12.dp, end = 8.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                BasicTextField(query, onQuery, singleLine = true,
+                    modifier = Modifier.weight(1f).padding(vertical = 8.dp).semantics { contentDescription = "搜索漫画" },
+                    textStyle = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { onSearch() }))
+                IconButton(onClick = onSearch) { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "搜索") }
+            }
+        }
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             ComicSort.entries.forEach { sort ->
-                Surface(onClick = { onSort(sort) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                Surface(onClick = { onSort(sort) }, modifier = Modifier.weight(1f).heightIn(min = 36.dp)
                     .semantics { selected = selectedSort == sort },
                     shape = MaterialTheme.shapes.small,
                     color = if (selectedSort == sort) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
                     contentColor = if (selectedSort == sort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) {
-                    Box(Modifier.padding(horizontal = 2.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+                    Box(Modifier.padding(horizontal = 2.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
                         Text(sort.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 11.sp)
                     }
                 }
@@ -358,7 +371,7 @@ private fun DetailScreen(detail: ComicDetail?, books: List<VolumeRecord>, tasks:
 private fun DownloadsScreen(tasks: List<DownloadRecord>, onPause: (String) -> Unit, onResume: (String) -> Unit,
     onCancel: (String) -> Unit, onClear: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Header("下载") { IconButton(onClick = onClear) { Icon(Icons.Outlined.PlaylistRemove, "清除已完成记录") } }
+        Header("下载", actionModifier = Modifier.offset(x = 12.dp)) { IconButton(onClick = onClear) { Icon(Icons.Outlined.PlaylistRemove, "清除已完成记录") } }
         if (tasks.isEmpty()) EmptyState("没有下载任务", "在漫画详情页选择卷册加入队列")
         LazyColumn(Modifier.padding(top = 14.dp)) {
             items(tasks, key = { it.id }) { task ->

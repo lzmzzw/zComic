@@ -159,7 +159,11 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     fun recent() = browse(ComicSort.RECENT)
 
     fun browse(sort: ComicSort) = loadList(sort) { site.browse(sort) }
-    fun search(text: String) = loadList(null) { site.search(text.trim()) }
+    fun search(text: String): Job {
+        val keyword = text.trim()
+        return if (keyword.isEmpty()) browse(ComicSort.COMPREHENSIVE)
+            else loadList(null) { site.search(keyword) }
+    }
 
     private fun loadList(sort: ComicSort?, action: suspend () -> List<OnlineComic>): Job {
         browseJob?.cancel()

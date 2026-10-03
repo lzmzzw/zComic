@@ -18,11 +18,11 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 
 @Composable
-internal fun Header(title: String, action: @Composable RowScope.() -> Unit = {}) {
+internal fun Header(title: String, actionModifier: Modifier = Modifier, action: @Composable RowScope.() -> Unit = {}) {
     Row(Modifier.fillMaxWidth().heightIn(min = 54.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween) {
         Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Row(content = action)
+        Row(modifier = actionModifier, content = action)
     }
 }
 
