@@ -6,7 +6,7 @@
 
 使用 Android SDK 35 和 JDK 17。完整验证命令为 `.\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:lintRelease :app:assembleRelease --no-daemon`；日常调试可运行 `:app:assembleDebug`。当前 Windows 测试进程无法从含中文的工程路径加载测试类，需要先建立英文路径目录联接，再从联接路径运行上述命令。当前工作区入口为 `F:\Workspace\zcomic-test-link`。
 
-正式构建位于 `app/build/outputs/apk/release/app-release.apk`，开启 R8 压缩与资源裁剪；版本名为 `1.0.0`，内部版本号为 5。个人使用的 release 构建沿用此前 debug 包的本机签名，便于覆盖安装并保留数据；它不是面向应用商店分发的独立发布签名。签名密钥不随源码上传，在其他机器构建时会使用该机器的 debug 签名，无法直接覆盖本机签名的安装包。数据库 v1 升级到 v2 时增加文件内容指纹及在线卷册关联，不清空书架、任务或阅读记录；旧文件指纹在书架检查时补齐。
+正式构建位于 `app/build/outputs/apk/release/app-release.apk`，开启 R8 压缩与资源裁剪；版本名为 `1.0.0`，内部版本号为 6。个人使用的 release 构建沿用此前 debug 包的本机签名，便于覆盖安装并保留数据；它不是面向应用商店分发的独立发布签名。签名密钥不随源码上传，在其他机器构建时会使用该机器的 debug 签名，无法直接覆盖本机签名的安装包。数据库 v1 升级到 v2 时增加文件内容指纹及在线卷册关联，不清空书架、任务或阅读记录；旧文件指纹在书架检查时补齐。
 
 JVM 回归测试覆盖网站解析、排序入口、Cookie 生命周期、实际 HTTP 取消、续传请求头、EPUB 资源索引和点击/滑动方向。MediaStore/目录授权、数据库升级、图片解码与触控效果仍需 Android 15 真机验证；单元测试和构建成功不替代这些设备验证。
 

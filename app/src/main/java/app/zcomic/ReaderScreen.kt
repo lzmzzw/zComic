@@ -55,9 +55,11 @@ private data class PageTurn(
     val from: Int,
     val to: Int,
     val forward: Boolean,
-    val fromBitmap: Bitmap?,
-    val toBitmap: Bitmap?
+    val fromBitmap: Bitmap,
+    val toBitmap: Bitmap
 )
+
+private data class DecodedPage(val page: Int, val bitmap: Bitmap)
 
 @Composable
 fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit, onBack: () -> Unit) {
@@ -76,6 +78,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     val scope = rememberCoroutineScope()
     val turnProgress = remember { Animatable(0f) }
     var turn by remember { mutableStateOf<PageTurn?>(null) }
+    var readyPage by remember(book) { mutableStateOf<DecodedPage?>(null) }
     var turning by remember { mutableStateOf(false) }
     var sliderPage by remember { mutableStateOf<Float?>(null) }
     var turnJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -143,13 +146,16 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
         turnJob = scope.launch {
             try {
                 val fromPage = page
-                val fromBitmap = withContext(Dispatchers.IO) { activeBook.bitmap(fromPage) }
+                val fromBitmap = readyPage?.takeIf { it.page == fromPage }?.bitmap
+                    ?: withContext(Dispatchers.IO) { activeBook.bitmap(fromPage) }
                 val toBitmap = withContext(Dispatchers.IO) { activeBook.bitmap(target) }
                 if (fromBitmap == null || toBitmap == null) error("图片页无法解码")
                 turnProgress.snapTo(0f)
                 turn = PageTurn(fromPage, target, delta > 0, fromBitmap, toBitmap)
                 turnProgress.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
                 if (mode == startMode) {
+                    // Keep the decoded target alive across removal of the animated overlay.
+                    readyPage = DecodedPage(target, toBitmap)
                     page = target
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -207,14 +213,16 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                         }
                     }) {
                     val activeTurn = turn
-                    if (activeTurn == null) {
-                        ReaderImage(book!!, page, fit, Modifier.fillMaxSize())
-                    } else {
-                        val progress = turnProgress.value
+                    val progress = if (activeTurn == null) 1f else turnProgress.value
+                    val renderedPage = activeTurn?.to ?: page
+                    // The destination stays in the same composition slot during and after a turn.
+                    ReaderImage(book!!, renderedPage, fit, Modifier.fillMaxSize().graphicsLayer {
+                        scaleX = 0.97f + progress * 0.03f
+                    }, preloaded = activeTurn?.toBitmap
+                        ?: readyPage?.takeIf { it.page == renderedPage }?.bitmap,
+                        onDecoded = { readyPage = DecodedPage(renderedPage, it) })
+                    if (activeTurn != null) {
                         val foldFromRight = activeTurn.forward == (mode == "从左往右")
-                        ReaderImage(book!!, activeTurn.to, fit, Modifier.fillMaxSize().graphicsLayer {
-                            scaleX = 0.97f + progress * 0.03f
-                        }, preloaded = activeTurn.toBitmap)
                         ReaderImage(book!!, activeTurn.from, fit, Modifier.fillMaxSize()
                             .drawWithContent {
                                 drawContent()
@@ -224,7 +232,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                             }
                             .graphicsLayer {
                                 transformOrigin = TransformOrigin(if (foldFromRight) 0f else 1f, 0.5f)
-                                rotationY = (if (foldFromRight) -88f else 88f) * progress
+                                rotationY = (if (foldFromRight) -90f else 90f) * progress
                                 cameraDistance = 24f * density
                             }, preloaded = activeTurn.fromBitmap)
                     }
@@ -277,16 +285,21 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
 
 @Composable
 private fun ReaderImage(book: EpubBook, page: Int, fit: String, modifier: Modifier,
-    continuous: Boolean = false, preloaded: Bitmap? = null) {
+    continuous: Boolean = false, preloaded: Bitmap? = null, onDecoded: (Bitmap) -> Unit = {}) {
     var imageError by remember(book, page) { mutableStateOf(false) }
-    val bitmap by produceState(preloaded, book, page, preloaded) {
-        value = preloaded
-        imageError = false
-        try {
-            if (preloaded == null) value = withContext(Dispatchers.IO) { book.bitmap(page) }
-            imageError = value == null
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { imageError = true }
+    val latestOnDecoded by rememberUpdatedState(onDecoded)
+    // Preloaded pages render synchronously; never clear them in an asynchronous producer.
+    val bitmap = preloaded ?: key(book, page) {
+        val decoded by produceState<Bitmap?>(null, book, page) {
+            imageError = false
+            try {
+                value = withContext(Dispatchers.IO) { book.bitmap(page) }
+                imageError = value == null
+                value?.let { latestOnDecoded(it) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { imageError = true }
+        }
+        decoded
     }
     var scale by remember(page) { mutableFloatStateOf(1f) }
     val ratio = book.pageRatios.getOrNull(page) ?: 0.72f
