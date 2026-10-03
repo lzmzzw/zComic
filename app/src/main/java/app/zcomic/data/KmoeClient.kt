@@ -81,10 +81,12 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
         .build()
 
     private suspend fun <T> request(request: Request, sessionGeneration: Long? = null, block: suspend (Response) -> T): T = coroutineScope {
+        val transport = currentCoroutineContext()[RequestTransport]
+        val requestClient = transport?.client?.invoke(client) ?: client
         val call = synchronized(sessionLock) {
             if (sessionGeneration != null && sessionGeneration != generation)
                 throw CancellationException("登录已取消")
-            client.newCall(request.newBuilder().tag(Session::class.java, Session(generation)).build())
+            requestClient.newCall(request.newBuilder().tag(Session::class.java, Session(generation)).build())
                 .also { calls += it }
         }
         // A separate dispatcher keeps cancellation responsive while IO reads block.
@@ -97,7 +99,9 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
                     currentCoroutineContext().ensureActive()
                     call.execute().use { response ->
                         currentCoroutineContext().ensureActive()
-                        val result = block(response)
+                        val counted = if (transport != null && response.body != null)
+                            response.newBuilder().body(transport.count(response.body!!)).build() else response
+                        val result = block(counted)
                         currentCoroutineContext().ensureActive()
                         if (call.isCanceled() || synchronized(sessionLock) {
                             call.request().tag(Session::class.java)?.generation != generation

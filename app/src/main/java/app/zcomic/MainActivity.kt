@@ -91,6 +91,7 @@ private fun ComicApp(incoming: Uri?, consumed: () -> Unit, vm: ComicViewModel = 
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val books by vm.volumes.collectAsState()
+    val downloadLastStop by vm.downloadLastStop.collectAsState()
     val volumesLoaded by vm.volumesLoaded.collectAsState()
     val tasks by vm.downloads.collectAsState()
     val online by vm.online.collectAsState()
@@ -173,7 +174,7 @@ private fun ComicApp(incoming: Uri?, consumed: () -> Unit, vm: ComicViewModel = 
                     tab == "发现" -> DiscoverScreen(online, query, selectedSort, browseBusy, onQuery = { query = it },
                         onSearch = { vm.search(query) }, onSort = vm::browse,
                         onComic = { selectedComic = it })
-                    else -> DownloadsScreen(tasks, onPause = vm::pause, onResume = vm::resume,
+                    else -> DownloadsScreen(tasks, downloadLastStop, onPause = vm::pause, onResume = vm::resume,
                         onCancel = vm::cancel, onClear = vm::clearCompleted)
                 }
                 if (message.isNotBlank()) {
@@ -386,10 +387,12 @@ private fun DetailScreen(detail: ComicDetail?, books: List<VolumeRecord>, tasks:
 }
 
 @Composable
-private fun DownloadsScreen(tasks: List<DownloadRecord>, onPause: (String) -> Unit, onResume: (String) -> Unit,
+private fun DownloadsScreen(tasks: List<DownloadRecord>, lastStop: String, onPause: (String) -> Unit, onResume: (String) -> Unit,
     onCancel: (String) -> Unit, onClear: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Header("下载", actionModifier = Modifier.offset(x = 12.dp)) { IconButton(onClick = onClear) { Icon(Icons.Outlined.PlaylistRemove, "清除已完成记录") } }
+        if (lastStop.isNotBlank()) Text("最近中断：$lastStop", fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (tasks.isEmpty()) EmptyState("没有下载任务", "在漫画详情页选择卷册加入队列")
         LazyColumn(Modifier.padding(top = 14.dp)) {
             items(tasks, key = { it.id }) { task ->

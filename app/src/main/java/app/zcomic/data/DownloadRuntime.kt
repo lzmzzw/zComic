@@ -16,6 +16,7 @@ internal class DownloadRuntime private constructor(context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val db = ComicDatabase.open(context)
     val files = ComicFiles(context)
+    val diagnostics = DownloadDiagnostics.get(context)
     val site = KmoeClient()
     private val account = Credentials(context)
     private val session = Mutex()

@@ -61,6 +61,7 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     val detailBusy = _detailBusy.asStateFlow()
     val message = _message.asStateFlow()
     val loginStatus = runtime.loginStatus
+    val downloadLastStop = runtime.diagnostics.lastStop
     val savedCredentials = runtime.saved
     private val _importedVolume = MutableStateFlow<VolumeRecord?>(null)
     val importedVolume = _importedVolume.asStateFlow()
