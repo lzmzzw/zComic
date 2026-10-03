@@ -48,6 +48,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.zcomic.data.*
 
 private val onlineComicSaver = listSaver<OnlineComic?, String>(
@@ -76,6 +79,17 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun ComicApp(incoming: Uri?, consumed: () -> Unit, vm: ComicViewModel = viewModel()) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    DisposableEffect(vm, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) vm.restoreDownloads()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) vm.restoreDownloads()
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val books by vm.volumes.collectAsState()
     val volumesLoaded by vm.volumesLoaded.collectAsState()
     val tasks by vm.downloads.collectAsState()
@@ -148,7 +162,11 @@ private fun ComicApp(incoming: Uri?, consumed: () -> Unit, vm: ComicViewModel = 
                     selectedGroup != null -> GroupScreen(groupBooks,
                         onBack = { selectedGroup = null }, onRead = { readerId = it.id }, onDelete = vm::deleteVolume)
                     selectedComicId != null -> DetailScreen(matchingDetail, books, tasks, detailBusy,
-                        onBack = { selectedComic = null }, onQueue = vm::queue)
+                        onBack = { selectedComic = null }, onQueue = { selected ->
+                            if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                            vm.queue(selected)
+                        })
                     tab == "书架" -> ShelfScreen(books, onGroup = { selectedGroup = it },
                         onImport = { import.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
                         onScan = { scan.launch(null) }, onSettings = { settings = true }, onDeleteBook = vm::deleteBook)

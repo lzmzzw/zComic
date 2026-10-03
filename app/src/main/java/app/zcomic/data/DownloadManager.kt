@@ -4,8 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.room.withTransaction
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -13,32 +12,33 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 
-/** Main-scope job ownership; file/network work runs on IO, permits suspend while queued. */
+/** System-job ownership; commands and job registration run on Main, transfers run on IO. */
 internal class DownloadManager(
     private val context: Context,
-    private val scope: CoroutineScope,
     private val db: ComicDatabase,
     private val files: ComicFiles,
-    private val site: KmoeClient
+    private val site: KmoeClient,
+    private val scheduler: DownloadScheduler,
+    private val authenticated: suspend (suspend () -> Unit) -> Unit
 ) {
     private val dao = db.dao()
     private val permits = Semaphore(2)
     private val commands = Mutex()
     private val jobs = mutableMapOf<String, Job>()
+    private val revisions = mutableMapOf<String, Long>()
+    private val transferFiles = ResumableTransfer(File(context.filesDir, "downloads"), site)
 
     suspend fun restore() = commands.withLock {
-        dao.pendingDownloads().forEach { start(it.id) }
+        dao.pendingDownloads().forEach { scheduler.schedule(it) }
     }
 
     suspend fun enqueue(detail: ComicDetail, selected: List<OnlineVolume>): Int = commands.withLock {
@@ -48,7 +48,8 @@ internal class DownloadManager(
             if (dao.volume(volume.id) != null || task?.status in listOf("queued", "running", "paused")) continue
             dao.putDownload(DownloadRecord(volume.id, detail.comic.id, detail.comic.title,
                 volume.title, volume.number, detail.comic.detailUrl))
-            start(volume.id)
+            revisions[volume.id] = (revisions[volume.id] ?: 0) + 1
+            scheduler.schedule(requireNotNull(dao.download(volume.id)))
             added++
         }
         added
@@ -65,14 +66,19 @@ internal class DownloadManager(
         val task = dao.download(id) ?: return@withLock
         if (task.status == "completed") return@withLock
         dao.updateDownloadState(id, "queued")
-        start(id)
+        revisions[id] = (revisions[id] ?: 0) + 1
+        scheduler.schedule(requireNotNull(dao.download(id)))
     }
 
     suspend fun cancel(id: String) = commands.withLock {
         jobs[id]?.cancelAndJoin()
         // Publication is a short non-cancellable commit. A completed file stays on the shelf.
         if (dao.download(id)?.status != "completed") dao.deleteDownload(id)
-        withContext(Dispatchers.IO) { cleanPartial(id) }
+        withContext(Dispatchers.IO) { transferFiles.clean(id) }
+        withContext(Dispatchers.IO) {
+            val name = id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            listOf("part", "source", "validator").forEach { File(context.cacheDir, "$name.$it").delete() }
+        }
     }
 
     suspend fun pauseAll() = commands.withLock {
@@ -81,30 +87,95 @@ internal class DownloadManager(
         active.values.forEach { it.cancel() }
         active.values.forEach { it.join() }
         ids.forEach { dao.interruptDownload(it, "paused") }
+        scheduler.cancelAll()
     }
 
-    private fun start(id: String) {
-        if (jobs[id]?.isActive == true) return
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            try {
-                permits.withPermit {
-                    val task = dao.download(id) ?: return@withPermit
-                    if (task.status !in listOf("queued", "running")) return@withPermit
-                    dao.updateDownloadState(id, "running")
-                    withContext(Dispatchers.IO) { transfer(task) }
+    /** Finish under the same command lock as enqueue, avoiding a lost last-moment enqueue. */
+    suspend fun drain(onFinished: (Boolean) -> Unit) = supervisorScope {
+        val attempted = mutableMapOf<String, Long>()
+        while (true) {
+            val batch = commands.withLock {
+                val pending = dao.pendingDownloads().filter { attempted[it.id] != (revisions[it.id] ?: 0) }
+                if (pending.isEmpty()) {
+                    scheduler.finished()
+                    onFinished(dao.pendingDownloads().isNotEmpty())
                 }
-            } catch (cancelled: CancellationException) {
-                val status = if (currentCoroutineContext().isActive) "paused" else "queued"
-                withContext(NonCancellable) { dao.interruptDownload(id, status) }
-                throw cancelled
-            } catch (error: Exception) {
-                dao.updateDownloadState(id, "failed", error.message ?: "下载失败")
-            } finally {
-                if (jobs[id] === currentCoroutineContext()[Job]) jobs.remove(id)
+                pending
+            }
+            if (batch.isEmpty()) break
+            attempted += batch.associate { it.id to (revisions[it.id] ?: 0) }
+            val executions = batch.map { task -> async { execute(task.id) } }
+            for (execution in executions) {
+                try { execution.await() }
+                catch (_: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    // A user's pause/cancel only interrupts this volume, not the queue.
+                }
             }
         }
-        jobs[id] = job
-        job.start()
+    }
+
+    /** Returns true only for recoverable transport failures, asking JobScheduler to retry. */
+    suspend fun execute(id: String): Boolean {
+        val own = requireNotNull(currentCoroutineContext()[Job])
+        // A replaced/stopped system job must finish flushing before a successor opens its files.
+        jobs[id]?.takeIf { it !== own }?.join()
+        val registered = commands.withLock {
+            val task = dao.download(id)
+            if (task?.status !in listOf("queued", "running")) false
+            else { jobs[id] = own; true }
+        }
+        if (!registered) return false
+        try {
+            permits.withPermit {
+                val task = dao.download(id) ?: return@withPermit
+                if (task.status !in listOf("queued", "running")) return@withPermit
+                dao.updateDownloadState(id, "running")
+                var attempts = 0
+                while (true) {
+                    try {
+                        authenticated { withContext(Dispatchers.IO) { transfer(task) } }
+                        break
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: IOException) {
+                        if (!recoverable(error) || ++attempts >= 3) throw error
+                        dao.updateDownloadState(id, "running", "连接中断，保留进度并重试")
+                        delay(1_000L shl (attempts - 1))
+                    }
+                }
+            }
+            return false
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) { dao.interruptDownload(id, "queued") }
+            throw cancelled
+        } catch (error: Exception) {
+            val retry = recoverable(error)
+            dao.updateDownloadState(id, if (retry) "queued" else "failed",
+                if (retry) "连接暂时不可用，保留进度并等待自动重试" else safeFailure(error))
+            return retry
+        } finally {
+            if (jobs[id] === own) jobs.remove(id)
+        }
+    }
+
+    private fun recoverable(error: Exception): Boolean = when (error) {
+        is DownloadHttpException -> error.statusCode in listOf(408, 429) || error.statusCode >= 500
+        is DownloadProtocolException -> false
+        is DownloadStorageException -> false
+        is java.net.ProtocolException -> false
+        is IOException -> error.message?.let { message ->
+            listOf("登录失败", "登录状态", "权限", "未提供下载地址", "同名文件").none { it in message }
+        } != false
+        else -> false
+    }
+
+    private fun safeFailure(error: Exception): String = when {
+        error is DownloadHttpException -> "下载服务器拒绝请求 (${error.statusCode})，请检查登录或稍后重试"
+        error.message?.contains("登录状态") == true -> "登录状态已失效，请重新登录后继续"
+        error is DownloadProtocolException -> "下载服务器返回了无效的续传响应，请稍后重试"
+        error is DownloadStorageException -> "无法保存下载文件，请检查设备空间后继续"
+        error.message?.contains("同名文件") == true -> "同名文件已存在，请先扫描文件夹或处理重名文件"
+        else -> "卷册处理失败，请检查文件空间、网站权限或重新检索"
     }
 
     private suspend fun transfer(task: DownloadRecord) {
@@ -113,85 +184,18 @@ internal class DownloadManager(
             ?: error("网站卷册已改变，请重新检索")
         val sources = listOf(volume.downloadOne, volume.downloadTwo).filter { it.isNotBlank() }.distinct()
         if (sources.isEmpty()) error("没有可用的单卷下载链接")
-        var last: Exception? = null
-        for (source in sources) {
-            repeat(3) { attempt ->
-                currentCoroutineContext().ensureActive()
-                try {
-                    fetch(task, source)
-                    return
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    last = error
-                    if (attempt < 2) delay(500L * (attempt + 1))
-                }
-            }
-        }
-        throw last ?: IOException("下载失败")
-    }
-
-    private suspend fun fetch(task: DownloadRecord, source: String) {
-        val part = partial(task.id, "part")
-        val marker = partial(task.id, "source")
-        val validatorFile = partial(task.id, "validator")
-        if (marker.takeIf { it.exists() }?.readText() != source) {
-            part.delete()
-            validatorFile.delete()
-        }
-        marker.writeText(source)
-        val validator = validatorFile.takeIf { it.exists() }?.readText().orEmpty()
-        if (part.length() > 0 && validator.isBlank()) part.delete()
-        val start = part.length()
-        dao.updateProgress(task.id, start, 0)
-        site.withDownload(source, start, validator) { response ->
-            val body = response.body ?: throw IOException("下载响应没有文件")
-            if (!response.isSuccessful) {
-                if (response.code == 416) cleanPartial(task.id)
-                throw IOException("下载请求失败 (${response.code})")
-            }
-            if (response.header("Content-Type").orEmpty().contains("text/html", true))
-                throw IOException("该下载线路返回网页，可能需要人工验证")
-            val append = start > 0 && response.code == 206 &&
-                response.header("Content-Range").orEmpty().startsWith("bytes $start-")
-            if (response.code == 206 && !append) {
-                cleanPartial(task.id)
-                throw IOException("下载续传范围不匹配，正在重新下载")
-            }
-            if (!append) {
-                part.delete()
-                val currentValidator = response.header("ETag") ?: response.header("Last-Modified")
-                if (currentValidator.isNullOrBlank()) validatorFile.delete()
-                else validatorFile.writeText(currentValidator)
-            }
-            val length = body.contentLength()
-            val total = if (length > 0) length + if (append) start else 0 else 0
-            var received = if (append) start else 0L
-            var lastUpdate = 0L
-            body.byteStream().use { input ->
-                FileOutputStream(part, append).buffered().use { output ->
-                    val buffer = ByteArray(128 * 1024)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        received += count
-                        val now = System.nanoTime()
-                        if (now - lastUpdate >= 500_000_000L) {
-                            dao.updateProgress(task.id, received, total)
-                            lastUpdate = now
-                        }
-                    }
-                }
-            }
-            currentCoroutineContext().ensureActive()
-            if (total > 0 && received != total) throw IOException("下载文件不完整，请重试")
+        val legacyName = task.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        transferFiles.migrateLegacy(task.id, File(context.cacheDir, "$legacyName.part"),
+            File(context.cacheDir, "$legacyName.source"), File(context.cacheDir, "$legacyName.validator"))
+        val part = transferFiles.download(task.id, sources) { received, total ->
             dao.updateProgress(task.id, received, total)
         }
         val book = try { EpubBook.open(context, Uri.fromFile(part)) }
         catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { cleanPartial(task.id); throw error }
+        catch (_: Exception) {
+            transferFiles.clean(task.id)
+            throw DownloadProtocolException("下载文件不是有效的 EPUB，请稍后重试")
+        }
         book.use {
             currentCoroutineContext().ensureActive()
             val hash = files.contentId(Uri.fromFile(part))
@@ -203,7 +207,7 @@ internal class DownloadManager(
                         dao.putDownload(task.copy(status = "completed", received = part.length(),
                             total = part.length(), error = "该卷已在书架中"))
                     }
-                    cleanPartial(task.id)
+                    transferFiles.clean(task.id)
                 }
                 return
             }
@@ -226,7 +230,7 @@ internal class DownloadManager(
                         runCatching { files.delete(target) }
                         if (duplicate.coverUri != cover) runCatching { files.deleteCover(cover) }
                     }
-                    cleanPartial(task.id)
+                    transferFiles.clean(task.id)
                 }
                 if (uri == null) throw IOException("同名文件已存在，请先扫描文件夹或处理重名文件")
             } catch (error: Exception) {
@@ -238,10 +242,4 @@ internal class DownloadManager(
         }
     }
 
-    private fun partial(id: String, extension: String): File =
-        File(context.cacheDir, "${id.replace(Regex("[^a-zA-Z0-9_-]"), "_")}.$extension")
-
-    private fun cleanPartial(id: String) {
-        listOf("part", "source", "validator").forEach { partial(id, it).delete() }
-    }
 }

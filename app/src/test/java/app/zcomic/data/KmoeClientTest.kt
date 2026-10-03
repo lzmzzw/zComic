@@ -3,6 +3,7 @@ package app.zcomic.data
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Assert.assertNull
@@ -88,6 +89,7 @@ class KmoeClientTest {
             assertEquals("/volume.epub?sign=test", file.path)
             assertEquals("Mozilla/5.0 zComic/1.0.0", file.getHeader("User-Agent"))
             assertEquals("$root/", file.getHeader("Referer"))
+            assertEquals("identity", file.getHeader("Accept-Encoding"))
         }
     }
 
@@ -235,6 +237,38 @@ class KmoeClientTest {
             }.exceptionOrNull()
             assertTrue(error is java.io.IOException)
             assertTrue(!error!!.message.orEmpty().contains("private-value"))
+        }
+    }
+
+    @Test fun resumedRequestResolvesANewSignedAddressEveryTime() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val root = server.url("/").toString().removeSuffix("/")
+            val client = KmoeClient(root)
+            repeat(2) { attempt ->
+                val signed = server.url("/file.epub?sign=version-$attempt")
+                server.enqueue(MockResponse().setBody("""{"url":"$signed"}"""))
+                server.enqueue(MockResponse().setBody("part"))
+                client.withDownload("$root/getdownurl.php?b=1", 100, "\"book\"") { it.body!!.string() }
+                assertTrue(server.takeRequest().path.orEmpty().startsWith("/getdownurl.php?"))
+                val download = server.takeRequest()
+                assertEquals("/file.epub?sign=version-$attempt", download.path)
+                assertEquals("bytes=100-", download.getHeader("Range"))
+            }
+        }
+    }
+
+    @Test fun downloadHttpFailuresKeepStatusWithoutSignedUrl() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setResponseCode(503))
+            val error = runCatching {
+                KmoeClient(server.url("/").toString().removeSuffix("/"))
+                    .withDownload(server.url("/file.epub?sign=private-value").toString()) { }
+            }.exceptionOrNull()
+            assertTrue(error is DownloadHttpException)
+            assertEquals(503, (error as DownloadHttpException).statusCode)
+            assertFalse(error.message.orEmpty().contains("private-value"))
         }
     }
 }

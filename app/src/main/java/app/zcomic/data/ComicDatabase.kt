@@ -53,6 +53,8 @@ interface ComicDao {
     fun volumes(): Flow<List<VolumeRecord>>
     @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
     fun downloads(): Flow<List<DownloadRecord>>
+    @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
+    fun observeDownload(id: String): Flow<DownloadRecord?>
     @Query("SELECT * FROM volumes WHERE id = :id OR sourceId = :id LIMIT 1")
     suspend fun volume(id: String): VolumeRecord?
     @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
@@ -69,7 +71,7 @@ interface ComicDao {
     suspend fun associateSource(id: String, sourceId: String)
     @Query("UPDATE volumes SET page = :page, pageCount = :count, lastReadAt = :readAt WHERE id = :id")
     suspend fun updateReading(id: String, page: Int, count: Int, readAt: Long)
-    @Query("UPDATE downloads SET received = :received, total = :total WHERE id = :id AND status = 'running'")
+    @Query("UPDATE downloads SET received = :received, total = :total, error = '' WHERE id = :id AND status = 'running'")
     suspend fun updateProgress(id: String, received: Long, total: Long)
     @Query("UPDATE downloads SET status = :status, error = :error WHERE id = :id AND status IN ('queued', 'running', 'paused', 'failed')")
     suspend fun updateDownloadState(id: String, status: String, error: String = "")

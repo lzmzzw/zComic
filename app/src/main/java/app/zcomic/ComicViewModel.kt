@@ -29,17 +29,14 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     private val operations = CoroutineScope(viewModelScope.coroutineContext + CoroutineExceptionHandler { _, error ->
         _message.value = error.message ?: "操作失败，请重试"
     })
-    private val db = ComicDatabase.open(application)
+    private val runtime = DownloadRuntime.get(application)
+    private val db = runtime.db
     private val dao = db.dao()
-    private val files = ComicFiles(application)
-    private val account = Credentials(application)
-    private val site = KmoeClient()
-    private val queue = DownloadManager(application, operations, db, files, site)
+    private val files = runtime.files
+    private val site = runtime.site
+    private val queue = runtime.queue
     private val resolver = application.contentResolver
     private val localFiles = Mutex()
-    private val session = Mutex()
-    private var sessionVersion = 0
-    private var accountVersion = 0
     private var loginJob: Job? = null
     private var browseJob: Job? = null
     private var detailJob: Job? = null
@@ -63,25 +60,16 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     private val _detailBusy = MutableStateFlow(false)
     val detailBusy = _detailBusy.asStateFlow()
     val message = _message.asStateFlow()
-    private val _loginStatus = MutableStateFlow("未登录")
-    val loginStatus = _loginStatus.asStateFlow()
-    private val _savedCredentials = MutableStateFlow<Pair<String, String>?>(null)
-    val savedCredentials = _savedCredentials.asStateFlow()
+    val loginStatus = runtime.loginStatus
+    val savedCredentials = runtime.saved
     private val _importedVolume = MutableStateFlow<VolumeRecord?>(null)
     val importedVolume = _importedVolume.asStateFlow()
 
     init {
-        operations.launch {
-            val version = accountVersion
-            val saved = withContext(Dispatchers.IO) { account.read() }
-            if (version == accountVersion) {
-                _savedCredentials.value = saved
-                if (saved != null && loginJob == null) login(saved.first, saved.second, remember = false).join()
-            }
-            loginJob?.join()
-            queue.restore()
-        }
+        operations.launch { runtime.restoreSession() }
     }
+
+    fun restoreDownloads() = operations.launch { queue.restore() }
 
     fun dismissMessage(expected: String) {
         if (_message.value == expected) _message.value = ""
@@ -90,71 +78,32 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     fun consumeImportedVolume() { _importedVolume.value = null }
 
     fun login(email: String, password: String, remember: Boolean = true): Job {
-        accountVersion++
         loginJob?.cancel()
         _loginBusy.value = true
-        _loginStatus.value = "正在登录"
         return operations.launch {
             try {
-                session.withLock {
-                    site.login(email, password)
-                    if (remember) {
-                        withContext(Dispatchers.IO) { account.save(email, password) }
-                        _savedCredentials.value = email to password
-                    }
-                    sessionVersion++
-                    _loginStatus.value = "已登录"
-                }
+                runtime.login(email, password, remember)
                 _message.value = "登录成功"
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                _loginStatus.value = "登录失败"
-                _message.value = error.message ?: "登录失败"
-            } finally {
+                queue.restore()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { _message.value = "登录失败，请检查账号或网络" }
+            finally {
                 if (loginJob === kotlinx.coroutines.currentCoroutineContext()[Job]) _loginBusy.value = false
             }
         }.also { loginJob = it }
     }
 
     fun logout() {
-        accountVersion++
         loginJob?.cancel()
         browseJob?.cancel()
         detailJob?.cancel()
-        site.logout()
-        operations.launch { queue.pauseAll() }
-        sessionVersion++
-        account.clear()
+        runtime.logout()
+        runtime.scope.launch { queue.pauseAll() }
         _loginBusy.value = false
-        _savedCredentials.value = null
-        _loginStatus.value = "未登录"
         _message.value = "已退出登录"
     }
 
-    private suspend fun <T> authenticated(action: suspend () -> T): T {
-        val version = sessionVersion
-        try { return action() }
-        catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) {
-            if (error.message?.contains("登录状态") != true) throw error
-            session.withLock {
-                if (version == sessionVersion) {
-                    val saved = _savedCredentials.value ?: throw error
-                    try {
-                        site.login(saved.first, saved.second)
-                        _loginStatus.value = "已登录"
-                        sessionVersion++
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (loginError: Exception) {
-                        _loginStatus.value = "登录失败"
-                        throw loginError
-                    }
-                }
-            }
-            return action()
-        }
-    }
+    private suspend fun <T> authenticated(action: suspend () -> T): T = runtime.authenticated(action)
 
     fun recent() = browse(ComicSort.RECENT)
 

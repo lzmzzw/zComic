@@ -215,23 +215,49 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
 
     suspend fun <T> withDownload(url: String, from: Long = 0, validator: String = "",
         block: suspend (Response) -> T): T {
-        val target = withContext(Dispatchers.IO) {
-            if (url.startsWith("$root/getdownurl.php?")) {
-                val result = parseJson(html(url), "网站返回了无效的下载响应")
-                val resolved = result.optString("url")
-                if (resolved.isBlank()) throw IOException("网站未提供下载地址，可能需要人工验证或权限不足")
-                parseUrl(resolved)
-            } else parseUrl(url)
+        try {
+            val target = withContext(Dispatchers.IO) {
+                if (url.startsWith("$root/getdownurl.php?")) {
+                    val result = request(Request.Builder().url(url).header("User-Agent", userAgent)
+                        .header("Referer", "$root/").build()) { response ->
+                        if (!response.isSuccessful) throw DownloadHttpException(response.code, "下载地址获取失败 (${response.code})")
+                        if (response.request.url.encodedPath.endsWith("login.php"))
+                            throw DownloadHttpException(401, "登录状态已失效")
+                        parseJson(response.body?.string().orEmpty(), "网站返回了无效的下载响应")
+                    }
+                    val resolved = result.optString("url")
+                    if (resolved.isBlank()) throw IOException("网站未提供下载地址，可能需要人工验证或权限不足")
+                    parseUrl(resolved)
+                } else parseUrl(url)
+            }
+            require(target.isHttps || (rootUrl.scheme == "http" && target.host == rootUrl.host && target.port == rootUrl.port)) { "下载链接必须使用 HTTPS" }
+            val downloadRequest = Request.Builder().url(target).header("Referer", "$root/")
+                .header("User-Agent", userAgent)
+                .header("Accept-Encoding", "identity")
+                .apply {
+                    if (from > 0 && validator.isNotBlank()) {
+                        header("Range", "bytes=$from-")
+                        header("If-Range", validator)
+                    }
+                }.build()
+            return request(downloadRequest) { response ->
+                if (response.request.url.encodedPath.endsWith("login.php"))
+                    throw DownloadHttpException(401, "登录状态已失效")
+                if (response.code !in listOf(200, 206, 416))
+                    throw DownloadHttpException(response.code, "下载请求失败 (${response.code})")
+                block(response)
+            }
+            } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: DownloadHttpException) {
+            throw error
+        } catch (error: DownloadProtocolException) {
+            throw error
+        } catch (error: DownloadStorageException) {
+            throw error
+        } catch (_: IOException) {
+            // OkHttp errors can contain the signed URL; never retain them as a cause or message.
+            throw IOException("下载连接中断，请稍后重试")
         }
-        require(target.isHttps || (rootUrl.scheme == "http" && target.host == rootUrl.host && target.port == rootUrl.port)) { "下载链接必须使用 HTTPS" }
-        val downloadRequest = Request.Builder().url(target).header("Referer", "$root/")
-            .header("User-Agent", userAgent)
-            .apply {
-                if (from > 0 && validator.isNotBlank()) {
-                    header("Range", "bytes=$from-")
-                    header("If-Range", validator)
-                }
-            }.build()
-        return request(downloadRequest, block = block)
     }
 }
