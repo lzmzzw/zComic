@@ -11,6 +11,10 @@ import androidx.documentfile.provider.DocumentFile
 import java.security.MessageDigest
 import java.io.File
 import java.io.IOException
+import java.nio.file.DirectoryNotEmptyException
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.NonCancellable
@@ -19,6 +23,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 data class ScannedComicFile(val uri: Uri, val parentName: String)
+
+data class BookFileDeletion(val deleted: Boolean, val directoryCleanupFailed: Boolean = false)
 
 class ComicFiles(private val context: Context) {
     private val resolver = context.contentResolver
@@ -35,6 +41,20 @@ class ComicFiles(private val context: Context) {
         "file" -> File(requireNotNull(uri.path)).delete()
         "content" -> resolver.delete(uri, null, null) > 0
         else -> throw IOException("不支持的文件地址")
+    }
+
+    fun deleteBookFile(uri: Uri): BookFileDeletion {
+        // Read the location before deleting the MediaStore row; never infer it from a title.
+        var locationUnavailable = false
+        val parent = try {
+            resolver.query(uri, arrayOf(MediaStore.Files.FileColumns.DATA), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0)?.let { path -> File(path).parentFile } else null
+            }.also { if (it == null) locationUnavailable = true }
+        } catch (_: Exception) { locationUnavailable = true; null }
+        if (!delete(uri)) return BookFileDeletion(false)
+        val root = File(Environment.getExternalStorageDirectory(), "${Environment.DIRECTORY_DOCUMENTS}/zComic")
+        val cleaned = if (parent == null) !locationUnavailable else removeEmptyBookDirectory(parent, root)
+        return BookFileDeletion(true, directoryCleanupFailed = !cleaned)
     }
 
     fun deleteCover(coverUri: String) {
@@ -156,4 +176,21 @@ class ComicFiles(private val context: Context) {
         }
         return results
     }
+}
+
+internal fun removeEmptyBookDirectory(directory: File, root: File): Boolean {
+    return try {
+        val managedRoot = root.canonicalFile
+        val target = directory.canonicalFile
+        // Only direct book directories belong to this cleanup. Do not follow a redirected path.
+        if (target.parentFile != managedRoot || target != directory.absoluteFile) return true
+        try {
+            val path = target.toPath()
+            if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) return !Files.exists(path, LinkOption.NOFOLLOW_LINKS)
+            // Deleting a directory is non-recursive and atomically rejects any remaining entry.
+            Files.delete(path)
+            true
+        } catch (_: NoSuchFileException) { true }
+        catch (_: DirectoryNotEmptyException) { true }
+    } catch (_: Exception) { false }
 }

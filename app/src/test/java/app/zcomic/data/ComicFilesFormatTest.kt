@@ -8,6 +8,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
 import java.io.IOException
@@ -89,12 +90,66 @@ class ComicFilesFormatTest {
         assertTrue(media.storage.isEmpty())
     }
 
+    @Test fun deletingLastBookFileRemovesItsEmptyDirectoryButKeepsRoot() = runTest {
+        val target = files.copy(Uri.fromFile(source), "漫画", "卷1")!!
+        val root = File(Environment.getExternalStorageDirectory(), "Documents/zComic").apply { mkdirs() }
+        val directory = File(root, "last-book").apply { mkdirs() }
+        val stored = File(directory, "volume.epub").apply { writeBytes(content) }
+        media.storage.put(target, stored)?.delete()
+        media.rows.getValue(target).put(MediaStore.Files.FileColumns.DATA, stored.path)
+        assertEquals(BookFileDeletion(true), files.deleteBookFile(target))
+        assertFalse(stored.exists())
+        assertFalse(directory.exists())
+        assertTrue(root.isDirectory)
+    }
+
+    @Test fun deletingOneVolumePreservesOtherFilesAndHiddenFiles() = runTest {
+        val target = files.copy(Uri.fromFile(source), "漫画", "卷1")!!
+        val root = File(Environment.getExternalStorageDirectory(), "Documents/zComic")
+        val directory = File(root, "remaining-book").apply { mkdirs() }
+        val other = File(directory, ".notes").apply { writeText("keep") }
+        val stored = File(directory, "volume.epub").apply { writeBytes(content) }
+        media.storage.put(target, stored)?.delete()
+        media.rows.getValue(target).put(MediaStore.Files.FileColumns.DATA, stored.path)
+        assertEquals(BookFileDeletion(true), files.deleteBookFile(target))
+        assertTrue(directory.isDirectory)
+        assertEquals("keep", other.readText())
+    }
+
+    @Test fun failedFileDeletionDoesNotRemoveDirectory() = runTest {
+        val target = files.copy(Uri.fromFile(source), "漫画", "卷1")!!
+        val root = File(Environment.getExternalStorageDirectory(), "Documents/zComic")
+        val directory = File(root, "failed-book").apply { mkdirs() }
+        media.rows.getValue(target).put(MediaStore.Files.FileColumns.DATA, File(directory, "volume.epub").path)
+        media.failDelete = true
+        assertEquals(BookFileDeletion(false), files.deleteBookFile(target))
+        assertTrue(directory.isDirectory)
+        assertTrue(media.rows.containsKey(target))
+    }
+
+    @Test fun cleanupNeverDeletesRootOutsideDirectoryOrNestedDirectory() {
+        val root = File(context.cacheDir, "managed").apply { mkdirs() }
+        val outside = File(context.cacheDir, "outside").apply { mkdirs() }
+        val nested = File(root, "book/nested").apply { mkdirs() }
+        for (directory in listOf(root, outside, nested)) {
+            assertTrue(removeEmptyBookDirectory(directory, root))
+            assertTrue(directory.isDirectory)
+        }
+    }
+
+    @Test fun unavailableLocationReportsCleanupFailureAfterDeletingFile() = runTest {
+        val target = files.copy(Uri.fromFile(source), "漫画", "卷1")!!
+        assertEquals(BookFileDeletion(true, directoryCleanupFailed = true), files.deleteBookFile(target))
+        assertFalse(media.rows.containsKey(target))
+    }
+
     /** A document-provider boundary backed by files; it does not implement the copy logic under test. */
     private class TestMediaProvider : ContentProvider() {
         val rows = linkedMapOf<Uri, ContentValues>()
         val storage = linkedMapOf<Uri, File>()
         val deleted = mutableListOf<Uri>()
         var failOutput = false
+        var failDelete = false
         var onOpenOutput: (() -> Unit)? = null
         private var nextId = 1
 
@@ -102,7 +157,9 @@ class ComicFilesFormatTest {
         override fun getType(uri: Uri): String? = rows[uri]?.getAsString(MediaStore.Files.FileColumns.MIME_TYPE)
         override fun query(uri: Uri, projection: Array<out String>?, selection: String?,
             selectionArgs: Array<out String>?, sortOrder: String?): Cursor =
-            MatrixCursor(projection ?: arrayOf(MediaStore.Files.FileColumns._ID))
+            MatrixCursor(projection ?: arrayOf(MediaStore.Files.FileColumns._ID)).apply {
+                rows[uri]?.let { row -> addRow(columnNames.map { row.get(it) }.toTypedArray()) }
+            }
 
         override fun insert(uri: Uri, values: ContentValues?): Uri {
             val target = Uri.withAppendedPath(uri, (nextId++).toString())
@@ -118,6 +175,7 @@ class ComicFilesFormatTest {
         }
 
         override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
+            if (failDelete) return 0
             if (rows.remove(uri) == null) return 0
             deleted += uri
             storage.remove(uri)?.delete()

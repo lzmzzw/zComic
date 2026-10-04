@@ -245,7 +245,10 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteVolume(volume: VolumeRecord) = operations.launch(Dispatchers.IO) {
         localFiles.withLock {
-            try { removeVolume(volume); _message.value = "已从书架移除卷册和阅读位置" }
+            try {
+                val cleanupFailed = removeVolume(volume)
+                _message.value = if (cleanupFailed) "已移除卷册，但空目录清理失败" else "已从书架移除卷册和阅读位置"
+            }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { _message.value = error.message ?: "删除失败" }
         }
@@ -254,12 +257,14 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteBook(books: List<VolumeRecord>) = operations.launch(Dispatchers.IO) {
         localFiles.withLock {
             var deleted = 0
+            var cleanupFailed = false
             for (volume in books) {
-                try { removeVolume(volume); deleted++ }
+                try { cleanupFailed = removeVolume(volume) || cleanupFailed; deleted++ }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { /* Keep entries whose files could not be removed. */ }
             }
-            _message.value = if (deleted == books.size) "已删除整本漫画"
+            _message.value = if (deleted == books.size && cleanupFailed) "已删除整本漫画，但部分空目录清理失败"
+                else if (deleted == books.size) "已删除整本漫画"
                 else "已删除 $deleted / ${books.size} 卷，部分文件删除失败"
         }
     }
@@ -267,9 +272,11 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun removeVolume(volume: VolumeRecord) = withContext(NonCancellable) {
         val uri = Uri.parse(volume.uri)
         // Downloads/imports own a MediaStore copy; folder scans only reference source documents.
-        if (uri.authority == "media" && !files.delete(uri)) error("文件删除失败")
+        val deletion = if (uri.authority == "media") files.deleteBookFile(uri) else null
+        if (deletion?.deleted == false) error("文件删除失败")
         dao.deleteVolume(volume.id)
         files.deleteCover(volume.coverUri)
+        deletion?.directoryCleanupFailed == true
     }
 
     fun checkFiles() {
