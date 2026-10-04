@@ -29,10 +29,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -153,7 +151,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                 if (fromBitmap == null || toBitmap == null) error("图片页无法解码")
                 turnProgress.snapTo(0f)
                 turn = PageTurn(fromPage, target, delta > 0, fromBitmap, toBitmap)
-                turnProgress.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
+                turnProgress.animateTo(1f, tween(300, easing = FastOutSlowInEasing))
                 if (mode == startMode) {
                     // Keep the decoded target alive across removal of the animated overlay.
                     readyPage = DecodedPage(target, toBitmap)
@@ -197,7 +195,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
             }
             else -> {
                 var drag by remember { mutableFloatStateOf(0f) }
-                Box(Modifier.fillMaxSize()
+                Box(Modifier.fillMaxSize().clipToBounds()
                     .pointerInput(mode, count) {
                         detectHorizontalDragGestures(onDragEnd = {
                             when (readerSwipeAction(drag, mode)) {
@@ -216,26 +214,18 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                     val activeTurn = turn
                     val progress = if (activeTurn == null) 1f else turnProgress.value
                     val renderedPage = activeTurn?.to ?: page
+                    val offsets = readerTurnOffsets(progress, activeTurn?.forward ?: true, mode)
                     // The destination stays in the same composition slot during and after a turn.
                     ReaderImage(book!!, renderedPage, fit, Modifier.fillMaxSize().graphicsLayer {
-                        scaleX = 0.97f + progress * 0.03f
-                    }, preloaded = activeTurn?.toBitmap
+                        translationX = size.width * offsets.incoming
+                    }.background(background), preloaded = activeTurn?.toBitmap
                         ?: readyPage?.takeIf { it.page == renderedPage }?.bitmap,
                         onDecoded = { readyPage = DecodedPage(renderedPage, it) })
                     if (activeTurn != null) {
-                        val foldFromRight = activeTurn.forward == (mode == "从左往右")
                         ReaderImage(book!!, activeTurn.from, fit, Modifier.fillMaxSize()
-                            .drawWithContent {
-                                drawContent()
-                                drawRect(Brush.horizontalGradient(if (foldFromRight)
-                                    listOf(Color.Black.copy(alpha = 0.28f * progress), Color.Transparent)
-                                    else listOf(Color.Transparent, Color.Black.copy(alpha = 0.28f * progress))))
-                            }
                             .graphicsLayer {
-                                transformOrigin = TransformOrigin(if (foldFromRight) 0f else 1f, 0.5f)
-                                rotationY = (if (foldFromRight) -90f else 90f) * progress
-                                cameraDistance = 24f * density
-                            }, preloaded = activeTurn.fromBitmap)
+                                translationX = size.width * offsets.outgoing
+                            }.background(background), preloaded = activeTurn.fromBitmap)
                     }
                 }
             }
