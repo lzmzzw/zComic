@@ -6,7 +6,7 @@ zComic 是单进程、单设备的 Android 图片漫画工具。Compose 负责�
 
 | 模块 | 拥有的职责 |
 | --- | --- |
-| MainActivity / ComicApp | 外部 EPUB 打开入口、导航和状态恢复、页面组合 |
+| MainActivity / ComicApp | 外部 EPUB/PDF/MOBI 打开入口、导航和状态恢复、页面组合 |
 | ui/ComicComponents / ComicTheme | 公共页头、封面、空状态，以及橙色主题的颜色和圆角 |
 | ComicViewModel | 登录、检索、导入/扫描/删除的协调；向界面暴露只读 StateFlow |
 | KmoeClient | 同一 HTTP 会话、网站解析、排序规则、签名地址取得、请求取消 |
@@ -16,6 +16,8 @@ zComic 是单进程、单设备的 Android 图片漫画工具。Compose 负责�
 | DownloadManager | Room 队列双并发执行、错误分类和退避、暂停/恢复/取消、文件与记录提交 |
 | ResumableTransfer | 各线路持久部分文件、旧缓存迁移、文件版本/范围校验和安全拼接 |
 | ComicFiles | 内容指纹、MediaStore 待发布文件、可取消复制、目录扫描、私有封面 |
+| BookReader / ComicBook | 内容嗅探、共同阅读接口、暂存文件及取消收尾 |
+| PdfBook / MobiArchive / MobiHuffman / MobiBook | PDF 原生渲染与关闭、MOBI 记录和压缩解析、图文分页与缓存 |
 | EpubArchive / EpubBook | ZIP 与 spine 资源索引、路径兼容、稳定宽高比、按需解码和缓存关闭 |
 | ComicDatabase / ComicDao | 书架、下载及阅读记录、增量更新和 v1→v2 迁移 |
 | Credentials | 设备 Keystore 加密存储，以及注销后的旧保存拒绝提交 |
@@ -37,6 +39,8 @@ HTTP 取消涵盖响应头等待与响应体读取，会终止实际 OkHttp Call
 复制大文件和等待文件锁均可取消。只有发布及数据库提交使用 NonCancellable，成功后即使取消到达，也不会删除已登记的文件。下载卷册与完成任务在 Room 事务内提交；发布失败或数据库提交失败会清理目标。文件系统与数据库并非跨系统事务：进程被强制杀死在发布与数据库提交之间，仍可能留下未登记的公开文件，可通过目录扫描恢复。
 
 ## 阅读性能与状态
+
+三种格式共用 ComicBook 和既有阅读 UI；PDF 每次打开单个原生页并渲染后关闭，MOBI 文字固定版心分页、图片按记录顺序读取。格式限制和验证入口见 [本地文件指南](../local-formats.md)。
 
 EPUB 资源保留在 ZIP 文件中，页面图片不会整卷驻留。打开内容 URI 需要流式暂存，磁盘空间须容纳该卷临时副本；正常关闭时删除，进程被强制结束的临时文件交由系统缓存管理。每张图页的宽高比在显示前确定，连续滑动加载图片后不会改变行高；列表不使用页吸附。
 

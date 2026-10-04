@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import java.io.Closeable
 import java.io.File
 import kotlin.coroutines.coroutineContext
 
@@ -17,18 +16,19 @@ class EpubBook private constructor(
     private val archive: EpubArchive,
     private val sourceFile: File,
     private val temporaryFile: File?,
-    val pageRatios: List<Float>
-) : Closeable {
-    val title get() = archive.title
-    val pages get() = archive.pages
-    val cover: Bitmap? get() = bitmap(0, 512)
-    internal val sourceUri: Uri get() = Uri.fromFile(sourceFile)
+    override val pageRatios: List<Float>
+) : ComicBook {
+    override val title get() = archive.title
+    override val pages get() = archive.pages
+    override val cover: Bitmap? get() = bitmap(0, 512)
+    override val sourceUri: Uri get() = Uri.fromFile(sourceFile)
+    override val format = BookFormat.EPUB
     private val cache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
 
     @Synchronized
-    fun bitmap(page: Int, maxSize: Int = 2048): Bitmap? {
+    override fun bitmap(page: Int, maxSize: Int): Bitmap? {
         require(maxSize > 0)
         val path = pages.getOrNull(page) ?: return null
         val key = "$page-$maxSize"

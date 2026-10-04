@@ -40,7 +40,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import app.zcomic.data.EpubBook
+import app.zcomic.data.ComicBook
+import app.zcomic.data.BookReader
 import app.zcomic.data.VolumeRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -66,7 +67,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     val context = LocalContext.current
     val activity = context as? Activity
     val preferences = remember { context.getSharedPreferences("reader", android.content.Context.MODE_PRIVATE) }
-    var book by remember(record.id) { mutableStateOf<EpubBook?>(null) }
+    var book by remember(record.id) { mutableStateOf<ComicBook?>(null) }
     var error by remember(record.id) { mutableStateOf("") }
     var page by rememberSaveable(record.id) { mutableIntStateOf(record.page.coerceAtLeast(0)) }
     var toolbar by rememberSaveable { mutableStateOf(false) }
@@ -90,7 +91,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     val background = if (dark) Color.Black else Color(0xFFF4F3F1)
     LaunchedEffect(record.id, record.uri) {
         try {
-            val opened = EpubBook.open(context, Uri.parse(record.uri))
+            val opened = BookReader.open(context, Uri.parse(record.uri))
             try {
                 page = page.coerceIn(0, opened.pages.lastIndex)
                 book = opened
@@ -101,7 +102,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                 withContext(NonCancellable + Dispatchers.IO) { opened.close() }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (exception: Exception) { error = exception.message ?: "无法读取 EPUB" }
+        catch (exception: Exception) { error = exception.message ?: "无法读取文件" }
     }
     DisposableEffect(activity) {
         activity?.window?.insetsController?.hide(AndroidWindowInsets.Type.statusBars() or AndroidWindowInsets.Type.navigationBars())
@@ -284,7 +285,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
 }
 
 @Composable
-private fun ReaderImage(book: EpubBook, page: Int, fit: String, modifier: Modifier,
+private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modifier,
     continuous: Boolean = false, preloaded: Bitmap? = null, onDecoded: (Bitmap) -> Unit = {}) {
     var imageError by remember(book, page) { mutableStateOf(false) }
     val latestOnDecoded by rememberUpdatedState(onDecoded)

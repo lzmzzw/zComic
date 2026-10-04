@@ -77,9 +77,9 @@ class ComicFiles(private val context: Context) {
         } finally { temporary.delete() }
     }
 
-    private fun create(comic: String, volume: String): Uri? {
+    private fun create(comic: String, volume: String, format: BookFormat): Uri? {
         val path = "${Environment.DIRECTORY_DOCUMENTS}/zComic/${clean(comic)}/"
-        val filename = "${clean(volume)}.epub"
+        val filename = "${clean(volume)}.${format.extension}"
         val existing = resolver.query(MediaStore.Files.getContentUri("external"), arrayOf(MediaStore.Files.FileColumns._ID),
             "${MediaStore.Files.FileColumns.RELATIVE_PATH}=? AND ${MediaStore.Files.FileColumns.DISPLAY_NAME}=?",
             arrayOf(path, filename), null)?.use { it.moveToFirst() }
@@ -87,23 +87,23 @@ class ComicFiles(private val context: Context) {
         if (existing) return null
         val values = ContentValues().apply {
             put(MediaStore.Files.FileColumns.DISPLAY_NAME, filename)
-            put(MediaStore.Files.FileColumns.MIME_TYPE, "application/epub+zip")
+            put(MediaStore.Files.FileColumns.MIME_TYPE, format.mimeType)
             put(MediaStore.Files.FileColumns.RELATIVE_PATH, path)
             put(MediaStore.Files.FileColumns.IS_PENDING, 1)
         }
         return resolver.insert(MediaStore.Files.getContentUri("external"), values)
-            ?: throw IOException("无法创建 EPUB 文件")
+            ?: throw IOException("无法创建 ${format.name} 文件")
     }
 
     private fun publish(uri: Uri) {
         if (resolver.update(uri, ContentValues().apply { put(MediaStore.Files.FileColumns.IS_PENDING, 0) }, null, null) != 1)
-            throw IOException("无法发布 EPUB 文件")
+            throw IOException("无法发布文件")
     }
 
-    suspend fun copy(source: Uri, comic: String, volume: String,
+    suspend fun copy(source: Uri, comic: String, volume: String, format: BookFormat = BookFormat.EPUB,
         onPublished: suspend (Uri) -> Unit = {}): Uri? = copyMutex.withLock {
         currentCoroutineContext().ensureActive()
-        val target = create(comic, volume) ?: return@withLock null
+        val target = create(comic, volume, format) ?: return@withLock null
         var committed = false
         try {
             resolver.openInputStream(source).use { input ->
@@ -149,7 +149,7 @@ class ComicFiles(private val context: Context) {
                 currentCoroutineContext().ensureActive()
                 when {
                     child.isDirectory -> pending.add(child)
-                    child.isFile && child.name?.endsWith(".epub", ignoreCase = true) == true ->
+                    child.isFile && (BookFormat.fromName(child.name) != null || BookFormat.fromMimeType(child.type) != null) ->
                         results += ScannedComicFile(child.uri, parentName)
                 }
             }

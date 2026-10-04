@@ -159,11 +159,11 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
     fun import(uri: Uri) = operations.launch(Dispatchers.IO) {
         localFiles.withLock {
             try {
-                EpubBook.open(getApplication(), uri).use { book ->
+                BookReader.open(getApplication(), uri).use { book ->
                     val id = files.contentId(book.sourceUri)
                     dao.findVolume(id, uri.toString())?.let {
                         _importedVolume.value = it
-                        _message.value = "这本 EPUB 已在书架中"
+                        _message.value = "这本书已在书架中"
                         return@withLock
                     }
                     val filename = files.name(uri).substringBeforeLast('.')
@@ -171,7 +171,7 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
                     var cover = ""
                     try {
                         cover = files.saveCover(id, book.cover)
-                        val target = files.copy(book.sourceUri, comic, filename) { target ->
+                        val target = files.copy(book.sourceUri, comic, filename, book.format) { target ->
                             val volume = VolumeRecord(id, comic, comic, filename, volumeNumber(filename),
                                 target.toString(), coverUri = cover, pageCount = book.pages.size, contentHash = id)
                             val stored = storeLocalVolume(volume)
@@ -181,7 +181,7 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             _importedVolume.value = stored
                             _message.value = if (stored.id == volume.id && stored.uri == volume.uri)
-                                "已导入 $filename" else "这本 EPUB 已在书架中"
+                                "已导入 $filename" else "这本书已在书架中"
                         }
                         if (target == null) {
                             files.deleteCover(cover)
@@ -215,7 +215,7 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         val id = files.contentId(item.uri)
                         if (dao.findVolume(id, item.uri.toString()) != null) continue
-                        EpubBook.open(getApplication(), item.uri).use { book ->
+                        BookReader.open(getApplication(), item.uri).use { book ->
                             val title = files.name(item.uri).substringBeforeLast('.')
                             val comic = comicTitle(book.title, item.parentName)
                             val volume = VolumeRecord(id, comic, comic, title, volumeNumber(title),
@@ -228,7 +228,7 @@ class ComicViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { unreadable++ }
                 }
-                _message.value = "已检查 ${items.size} 个 EPUB，新增 $added 卷" +
+                _message.value = "已检查 ${items.size} 个文件，新增 $added 卷" +
                     if (unreadable > 0) "，$unreadable 个无法读取" else ""
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { _message.value = error.message ?: "扫描失败" }

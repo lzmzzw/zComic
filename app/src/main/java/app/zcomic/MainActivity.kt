@@ -169,7 +169,9 @@ private fun ComicApp(incoming: Uri?, consumed: () -> Unit, vm: ComicViewModel = 
                             vm.queue(selected)
                         })
                     tab == "书架" -> ShelfScreen(books, onGroup = { selectedGroup = it },
-                        onImport = { import.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                        // Providers often classify MOBI as generic binary data or omit its MIME type.
+                        // BookReader validates the selected content before storing it.
+                        onImport = { import.launch(arrayOf("*/*")) },
                         onScan = { scan.launch(null) }, onSettings = { settings = true }, onDeleteBook = vm::deleteBook)
                     tab == "发现" -> DiscoverScreen(online, query, selectedSort, browseBusy, onQuery = { query = it },
                         onSearch = { vm.search(query) }, onSort = vm::browse,
@@ -206,7 +208,7 @@ private fun ShelfScreen(books: List<VolumeRecord>, onGroup: (String) -> Unit,
                 IconButton(onClick = { addMenuExpanded = true }) { Icon(Icons.Outlined.Add, "添加") }
                 DropdownMenu(expanded = addMenuExpanded, onDismissRequest = { addMenuExpanded = false }) {
                     DropdownMenuItem(
-                        text = { Text("导入 EPUB") },
+                        text = { Text("导入文件 · EPUB / PDF / MOBI") },
                         leadingIcon = { Icon(Icons.Outlined.FileOpen, null) },
                         onClick = { addMenuExpanded = false; onImport() }
                     )
@@ -221,7 +223,7 @@ private fun ShelfScreen(books: List<VolumeRecord>, onGroup: (String) -> Unit,
         }
         Spacer(Modifier.height(12.dp))
         if (groups.isEmpty()) {
-            EmptyState("书架还没有 EPUB", "从本地导入，或登录后在发现页下载")
+            EmptyState("书架还没有书籍", "导入 EPUB、PDF 或 MOBI，或在发现页下载")
             return@Column
         }
         LazyVerticalGrid(columns = GridCells.Fixed(2), horizontalArrangement = Arrangement.spacedBy(12.dp),
