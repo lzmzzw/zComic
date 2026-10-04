@@ -33,12 +33,15 @@ internal class DownloadManager(
     private val dao = db.dao()
     private val permits = Semaphore(2)
     private val commands = Mutex()
+    private val draining = Mutex()
     private val jobs = mutableMapOf<String, Job>()
     private val revisions = mutableMapOf<String, Long>()
     private val transferFiles = ResumableTransfer(File(context.filesDir, "downloads"), site)
 
     suspend fun restore() = commands.withLock {
-        dao.pendingDownloads().forEach { scheduler.schedule(it) }
+        val pending = dao.pendingDownloads()
+        if (pending.isEmpty()) scheduler.cancelAll()
+        else pending.forEach { scheduler.schedule(it) }
     }
 
     suspend fun enqueue(detail: ComicDetail, selected: List<OnlineVolume>): Int = commands.withLock {
@@ -59,6 +62,7 @@ internal class DownloadManager(
         jobs[id]?.cancelAndJoin()
         dao.download(id)?.takeIf { it.status in listOf("queued", "running") }
             ?.let { dao.updateDownloadState(id, "paused") }
+        if (dao.pendingDownloads().isEmpty()) scheduler.cancelAll()
     }
 
     suspend fun resume(id: String) = commands.withLock {
@@ -79,6 +83,7 @@ internal class DownloadManager(
             val name = id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
             listOf("part", "source", "validator").forEach { File(context.cacheDir, "$name.$it").delete() }
         }
+        if (dao.pendingDownloads().isEmpty()) scheduler.cancelAll()
     }
 
     suspend fun pauseAll() = commands.withLock {
@@ -91,14 +96,17 @@ internal class DownloadManager(
     }
 
     /** Finish under the same command lock as enqueue, avoiding a lost last-moment enqueue. */
-    suspend fun drain(onFinished: (Boolean) -> Unit) = supervisorScope {
+    suspend fun drain(onFinished: (Boolean) -> Unit) = draining.withLock { drainQueue(onFinished) }
+
+    private suspend fun drainQueue(onFinished: (Boolean) -> Unit) = supervisorScope {
         val attempted = mutableMapOf<String, Long>()
         while (true) {
             val batch = commands.withLock {
                 val pending = dao.pendingDownloads().filter { attempted[it.id] != (revisions[it.id] ?: 0) }
                 if (pending.isEmpty()) {
-                    scheduler.finished()
-                    onFinished(dao.pendingDownloads().isNotEmpty())
+                    val retry = dao.pendingDownloads().isNotEmpty()
+                    scheduler.finished(hasPending = retry)
+                    onFinished(retry)
                 }
                 pending
             }

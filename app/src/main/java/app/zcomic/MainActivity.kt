@@ -389,8 +389,15 @@ private fun DetailScreen(detail: ComicDetail?, books: List<VolumeRecord>, tasks:
 @Composable
 private fun DownloadsScreen(tasks: List<DownloadRecord>, lastStop: String, onPause: (String) -> Unit, onResume: (String) -> Unit,
     onCancel: (String) -> Unit, onClear: () -> Unit) {
+    var backgroundSettings by rememberSaveable { mutableStateOf(false) }
+    if (backgroundSettings) BackgroundDownloadDialog { backgroundSettings = false }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Header("下载", actionModifier = Modifier.offset(x = 12.dp)) { IconButton(onClick = onClear) { Icon(Icons.Outlined.PlaylistRemove, "清除已完成记录") } }
+        Header("下载", actionModifier = Modifier.offset(x = 12.dp)) {
+            Row {
+                IconButton(onClick = { backgroundSettings = true }) { Icon(Icons.Outlined.Settings, "后台下载设置") }
+                IconButton(onClick = onClear) { Icon(Icons.Outlined.PlaylistRemove, "清除已完成记录") }
+            }
+        }
         if (lastStop.isNotBlank()) Text("最近中断：$lastStop", fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (tasks.isEmpty()) EmptyState("没有下载任务", "在漫画详情页选择卷册加入队列")
@@ -425,6 +432,8 @@ private fun DownloadsScreen(tasks: List<DownloadRecord>, lastStop: String, onPau
 @Composable
 private fun SettingsDialog(login: String, savedCredentials: Pair<String, String>?, message: String, busy: Boolean, onDismiss: () -> Unit,
     onLogin: (String, String) -> Unit, onLogout: () -> Unit) {
+    var backgroundSettings by rememberSaveable { mutableStateOf(false) }
+    if (backgroundSettings) BackgroundDownloadDialog { backgroundSettings = false }
     var email by remember(savedCredentials) { mutableStateOf(savedCredentials?.first.orEmpty()) }
     var password by remember(savedCredentials) { mutableStateOf(savedCredentials?.second.orEmpty()) }
     AlertDialog(onDismissRequest = onDismiss, modifier = Modifier.imePadding(), title = { Text("账号与设置") }, text = {
@@ -437,6 +446,7 @@ private fun SettingsDialog(login: String, savedCredentials: Pair<String, String>
             OutlinedTextField(password, { password = it }, label = { Text("密码") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, autoCorrectEnabled = false))
             TextButton(onClick = { onLogout(); onDismiss() }) { Text("退出登录") }
+            TextButton(onClick = { backgroundSettings = true }) { Text("后台下载设置") }
         }
     }, confirmButton = { TextButton(onClick = { onLogin(email.trim(), password) }, enabled = !busy && email.isNotBlank() && password.isNotBlank()) { Text("登录") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } })

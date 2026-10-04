@@ -49,7 +49,7 @@ class DownloadManagerTest {
             .build()
         jobs = context.getSystemService(JobScheduler::class.java).forNamespace("zcomic-downloads")
         jobs.cancelAll()
-        scheduler = DownloadScheduler(context, jobs)
+        scheduler = DownloadScheduler(context, jobs, usesForegroundService = false)
         server = MockWebServer().apply { start() }
     }
 
@@ -91,6 +91,16 @@ class DownloadManagerTest {
     }
 
     @Test
+    fun restoringAnInactiveQueueCancelsAnObsoleteSystemJob() = runTest(dispatcher) {
+        scheduler.schedule(record("obsolete"))
+        listOf("paused", "failed", "completed").forEach { status ->
+            db.dao().putDownload(record(status).copy(status = status))
+        }
+        manager().restore()
+        assertTrue(jobs.allPendingJobs.isEmpty())
+    }
+
+    @Test
     fun pauseWaitsForOldExecutionBeforeWritingPausedAndResumeRetainsProgress() = runTest(dispatcher) {
         val entered = CompletableDeferred<Unit>()
         val queue = manager { entered.complete(Unit); awaitCancellation() }
@@ -106,7 +116,7 @@ class DownloadManagerTest {
         assertTrue(execution.isCancelled)
         assertEquals("paused", db.dao().download(task.id)!!.status)
         assertEquals(100L, db.dao().download(task.id)!!.received)
-        assertEquals(setOf("queue"), scheduledIds())
+        assertTrue(scheduledIds().isEmpty())
         // A late system start cannot revive a user's paused task.
         assertFalse(queue.execute(task.id))
         assertEquals("paused", db.dao().download(task.id)!!.status)
@@ -132,7 +142,7 @@ class DownloadManagerTest {
 
         assertTrue(execution.isCancelled)
         assertNull(db.dao().download(task.id))
-        assertEquals(setOf("queue"), scheduledIds())
+        assertTrue(scheduledIds().isEmpty())
         assertFalse(queue.execute(task.id))
         assertNull(db.dao().download(task.id))
     }
@@ -272,6 +282,25 @@ class DownloadManagerTest {
         assertTrue(finishes.isEmpty())
         assertEquals(listOf("queued", "queued", "queued"), tasks.map { db.dao().download(it.id)!!.status })
         assertEquals(listOf(1L, 2L, 3L), tasks.map { db.dao().download(it.id)!!.received })
+    }
+
+    @Test
+    fun legacyAndForegroundExecutorsCannotDrainTheSameQueueConcurrently() = runTest(dispatcher) {
+        var entered = 0
+        val queue = manager { entered++; awaitCancellation() }
+        db.dao().putDownload(record("volume"))
+        val legacy = launch { queue.drain { } }
+        runCurrent()
+        assertEquals(1, entered)
+        val foreground = launch { queue.drain { } }
+        runCurrent()
+        assertEquals(1, entered)
+        legacy.cancelAndJoin()
+        runCurrent()
+        assertEquals(2, entered)
+        assertEquals("running", db.dao().download("volume")!!.status)
+        foreground.cancelAndJoin()
+        assertEquals("queued", db.dao().download("volume")!!.status)
     }
 
     private fun manager(authenticated: suspend (suspend () -> Unit) -> Unit = { it() }) =

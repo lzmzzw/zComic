@@ -1,6 +1,6 @@
 # zComic 架构与维护
 
-zComic 是单进程、单设备的 Android 图片漫画工具。Compose 负责页面与阅读交互，ViewModel 协调用户动作和只读状态流，数据层拥有站点协议、下载任务、本地文件与 EPUB 资源。后台下载由 Android JobScheduler 的 UIDT JobService 执行，不依附 Activity/ViewModel；没有跨设备同步，Room 下载记录是任务状态与进度的唯一业务来源。
+zComic 是单进程、单设备的 Android 图片漫画工具。Compose 负责页面与阅读交互，ViewModel 协调用户动作和只读状态流，数据层拥有站点协议、下载任务、本地文件与 EPUB 资源。小米系列后台下载由 dataSync 前台服务执行，其他设备由 UIDT JobService 执行，两者都不依附 Activity/ViewModel；没有跨设备同步，Room 下载记录是任务状态与进度的唯一业务来源。
 
 ## 模块职责
 
@@ -11,7 +11,8 @@ zComic 是单进程、单设备的 Android 图片漫画工具。Compose 负责�
 | ComicViewModel | 登录、检索、导入/扫描/删除的协调；向界面暴露只读 StateFlow |
 | KmoeClient | 同一 HTTP 会话、网站解析、排序规则、签名地址取得、请求取消 |
 | DownloadRuntime | 应用级共享账号会话、登录代次、文件服务及下载队列，后台冷启动恢复登录 |
-| DownloadScheduler / DownloadJobService | 单个持久 UIDT 系统任务、网络约束、下载通知、系统停止与重试 |
+| DownloadScheduler / DownloadJobService / DownloadForegroundService | 按设备调度前台服务或单个 UIDT 系统任务、通知、系统停止与重试 |
+| BackgroundDownloadSupport / BackgroundDownloadDialog | Android 限制状态、HyperOS 设置指南与系统跳转回退 |
 | DownloadManager | Room 队列双并发执行、错误分类和退避、暂停/恢复/取消、文件与记录提交 |
 | ResumableTransfer | 各线路持久部分文件、旧缓存迁移、文件版本/范围校验和安全拼接 |
 | ComicFiles | 内容指纹、MediaStore 待发布文件、可取消复制、目录扫描、私有封面 |
@@ -27,7 +28,9 @@ HTTP 取消涵盖响应头等待与响应体读取，会终止实际 OkHttp Call
 
 后台任务通过 RequestTransport 协程上下文将 JobParameters.network 传到全部 HTTP 请求，包括冷启动登录、详情、签名地址和下载。DownloadNetwork 为该网络绑定 DNS 与 Socket，并使用独立连接池，防止复用前台默认网络连接；onNetworkChanged 更新后续请求路由，已有读取正常结束或在连接中断后重试。网络暂不可用时返回可恢复错误，不静默退回默认路由。响应体读取累计本次任务传输字节，通知与系统统计最多每秒更新；估计量为本次已读取字节加队列剩余量，未知大小时不把它当作零。DownloadDiagnostics 只保存固定的中断描述和系统原因编号，不保存原始异常、地址或账号数据；进程未正常收尾时在重开后显示进程被结束。
 
-队列使用一个持久 UIDT Job 读取 Room，避免每卷一个系统任务的数量上限。用户在可见页面加入/恢复下载或重开应用时调度；新下载与队列结束共用命令锁，结束期间的新任务会重新注册系统 Job。任务内部用协程 Semaphore 保持最多双并发。暂停/恢复/取消先等待旧任务退出，再修改状态和临时文件，避免旧任务仍写文件；进度使用条件 UPDATE，不用旧记录覆盖新状态。用户暂停保留部分文件，取消清理部分文件；进程任务取消保留可恢复队列，注销中断的任务变为暂停。部分文件保存在 filesDir/downloads，各任务及线路使用 SHA-256 文件名；只存来源哈希、validator、总长度等必要信息，不保存签名地址。优先最近有部分文件的线路，切换线路不会覆盖已有部分；旧 cacheDir 的有效部分文件在首个下载请求前迁移。只有强 ETag 或合法 Last-Modified 及正确 Content-Range 才允许拼接，使用 identity 编码核对字节长度。200 响应安全从头下载，206 错误响应不污染已有部分，416 会核对总长度和版本。完整部分可直接进入 EPUB 校验及入库，无效 EPUB 清理后由用户重试。
+队列使用一个 UIDT Job 或前台服务读取 Room，避免每卷一个系统任务的数量上限。用户在可见页面加入/恢复下载或重开应用时调度；新下载与队列结束共用命令锁，结束期间的新任务会重新调度。队列执行锁保证遗留 UIDT 与新服务不能同时执行同一队列，最多双并发。暂停/恢复/取消先等待旧任务退出，再修改状态和临时文件；进度使用条件 UPDATE，不用旧记录覆盖新状态。用户暂停保留部分文件，取消清理部分文件；进程任务取消保留可恢复队列，注销中断的任务变为暂停。部分文件保存在 filesDir/downloads，各任务及线路使用 SHA-256 文件名；只存来源哈希、validator、总长度等必要信息，不保存签名地址。优先恢复有部分文件的线路，旧 cacheDir 有效部分文件在请求前迁移。只有强 ETag 或合法 Last-Modified 及正确 Content-Range 才允许拼接；200 安全重下，错误 206 不污染部分，416 核对长度和版本。完整文件校验 EPUB 后发布入库。
+
+小米前台服务声明 dataSync 类型，从可见页面启动后立即发布持续通知；迁移时取消旧 UIDT，不从开机广播启动服务。服务启动按代次去重，旧实例销毁不能清掉新请求；通知使用不同 ID，防止遗留 Job 停止移除新服务通知。CPU 锁为 PARTIAL_WAKE_LOCK，10 分钟自动过期、执行期间每 5 分钟续期，重试等待与所有退出路径释放；不保持屏幕亮起。系统超时立即停止服务并保留队列。其他设备保持原 UIDT 调度。HyperOS 私有设置入口仅尝试打开，不存在或不允许访问时退回应用信息，不通过隐藏接口修改授权；Android 电池豁免不能代表小米“无限制”或后台自启动已开启。
 
 下载请求每次重新解析签名地址。短暂连接错误退避重试，连续失败保留 queued 并交给系统指数退避；401/403 尝试恢复共享会话，权限或协议错误转为失败，磁盘错误提示检查空间。注销暂停所有下载、取消系统任务、清会话与设备凭据，后台登录返回后核对代次，避免注销被旧请求覆盖。系统停止回调按 jobId 取消真实协程，保留可恢复状态，不依赖回调参数对象身份。
 

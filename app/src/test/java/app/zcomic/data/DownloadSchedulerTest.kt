@@ -4,6 +4,7 @@ import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.Context
 import app.zcomic.DownloadJobService
+import app.zcomic.DownloadForegroundService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
@@ -13,6 +14,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -28,7 +30,7 @@ class DownloadSchedulerTest {
         jobs = context.getSystemService(JobScheduler::class.java).forNamespace("zcomic-downloads")
         jobs.cancelAll()
         // Robolectric does not share namespace shadows across forNamespace() instances.
-        scheduler = DownloadScheduler(context, jobs)
+        scheduler = DownloadScheduler(context, jobs, usesForegroundService = false)
     }
 
     @Test
@@ -79,6 +81,59 @@ class DownloadSchedulerTest {
         assertEquals(1, jobs.allPendingJobs.size)
         assertNotSame(ending, jobs.allPendingJobs.single())
         assertEquals("queue", jobs.allPendingJobs.single().extras.getString(DownloadScheduler.TASK_ID))
+    }
+
+    @Test
+    fun foregroundModeCancelsLegacyJobAndStartsOneServiceForLargeQueue() {
+        scheduler.schedule(record("legacy"))
+        val foreground = DownloadScheduler(context, jobs, usesForegroundService = true)
+        repeat(200) { foreground.schedule(record("volume-$it")) }
+        val app = shadowOf(RuntimeEnvironment.getApplication())
+        val start = app.nextStartedService
+        assertEquals(DownloadForegroundService::class.java.name, start.component!!.className)
+        assertEquals(1, start.getIntExtra(DownloadScheduler.GENERATION, 0))
+        org.junit.Assert.assertNull(app.nextStartedService)
+        assertTrue(jobs.allPendingJobs.isEmpty())
+    }
+
+    @Test
+    fun foregroundStopAllowsRestartButOldServiceDestructionCannotClearNewRequest() {
+        val foreground = DownloadScheduler(context, jobs, usesForegroundService = true)
+        foreground.schedule(record("volume-1"))
+        val app = shadowOf(RuntimeEnvironment.getApplication())
+        app.nextStartedService
+        foreground.foregroundStopped(1)
+        foreground.schedule(record("volume-2"))
+        assertEquals(2, app.nextStartedService.getIntExtra(DownloadScheduler.GENERATION, 0))
+        foreground.foregroundStopped(1)
+        foreground.schedule(record("volume-3"))
+        org.junit.Assert.assertNull(app.nextStartedService)
+        foreground.cancelAll()
+        assertEquals(DownloadForegroundService::class.java.name, app.nextStoppedService.component!!.className)
+    }
+
+    @Test
+    fun onlyActiveQueueAllowsRecoveryAndEmptyQueueOrUserPauseDisablesIt() {
+        val foreground = DownloadScheduler(context, jobs, usesForegroundService = true)
+        foreground.cancelAll()
+        assertTrue(!DownloadScheduler.recoveryPending(context))
+        listOf("completed", "paused", "failed").forEach { status ->
+            foreground.schedule(record("inactive").copy(status = status))
+        }
+        assertTrue(!DownloadScheduler.recoveryPending(context))
+        org.junit.Assert.assertNull(shadowOf(RuntimeEnvironment.getApplication()).nextStartedService)
+
+        foreground.schedule(record("active"))
+        assertTrue(DownloadScheduler.recoveryPending(context))
+        foreground.finished(hasPending = true)
+        assertTrue(DownloadScheduler.recoveryPending(context))
+        foreground.finished(hasPending = false)
+        assertTrue(!DownloadScheduler.recoveryPending(context))
+
+        foreground.schedule(record("another"))
+        assertTrue(DownloadScheduler.recoveryPending(context))
+        foreground.cancelAll()
+        assertTrue(!DownloadScheduler.recoveryPending(context))
     }
 
     private fun record(id: String) = DownloadRecord(id, "comic", "漫画", "卷 01", 1,

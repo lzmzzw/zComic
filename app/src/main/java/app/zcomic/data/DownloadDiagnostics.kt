@@ -35,6 +35,10 @@ internal class DownloadDiagnostics(context: Context) {
     }
 
     fun failed() { finished(); record("后台任务异常退出，已保留进度并等待重试") }
+    fun foregroundTimeout() { finished(); record("系统后台下载时限已到，保留进度；返回应用后继续") }
+    fun foregroundInterrupted() {
+        if (prefs.getBoolean("running", false)) record("后台下载服务被停止，已保留进度；请检查后台下载设置")
+    }
 
     private fun record(message: String) {
         _lastStop.value = message
