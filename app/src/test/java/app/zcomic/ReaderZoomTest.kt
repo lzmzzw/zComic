@@ -4,6 +4,40 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ReaderZoomTest {
+    @Test fun shrinkingAtBottomKeepsGestureItemTallUntilRelease() {
+        val width = 900f
+        val ratio = 0.5f
+        val duringGestureHeight = width * readerLandscapeLayoutWidth(0.3f, 2f / 3f) / ratio
+        assertEquals(1200f, duringGestureHeight, 0f)
+        org.junit.Assert.assertTrue(duringGestureHeight > 1100f)
+        assertEquals(540f, width * readerLandscapeLayoutWidth(0.3f, null) / ratio, 0f)
+        assertEquals(1f, readerLandscapeLayoutWidth(1.2f, null), 0f)
+    }
+
+    @Test fun landscapeStartsAtTwoThirdsAndNormalWidthsStayInsideViewport() {
+        assertEquals(2f / 3f, readerLandscapeWidth(Float.NaN), 0f)
+        assertEquals(2f / 3f, readerLandscapeWidth(Float.POSITIVE_INFINITY), 0f)
+        assertEquals(0.8f, readerLandscapeWidth(0.8f), 0f)
+        assertEquals(1f, readerLandscapeWidth(1.2f), 0f)
+        assertEquals(0.2f, readerLandscapeWidth(0.01f), 0f)
+    }
+
+    @Test fun landscapePinchCanCrossAndReturnThroughFullScreenWidth() {
+        val wider = readerLandscapeGestureWidth(2f / 3f, 1.2f)
+        assertEquals(0.8f, wider, 0.00001f)
+        val zoomed = readerLandscapeGestureWidth(wider, 1.5f)
+        assertEquals(1.2f, zoomed, 0.00001f)
+        assertEquals(0.6f, readerLandscapeGestureWidth(zoomed, 0.5f), 0.00001f)
+        assertEquals(5f, readerLandscapeGestureWidth(1f, 10f), 0f)
+    }
+
+    @Test fun reducedContinuousWidthHasNoPanningUntilItExceedsViewport() {
+        assertEquals(ReaderPanBounds(0f, 0f, 0f, 0f),
+            readerPanBounds(900f, 1200f, 0.5f, 1f, true, widthFraction = 2f / 3f))
+        assertEquals(ReaderPanBounds(-90f, 90f, -180f, 180f),
+            readerPanBounds(900f, 1800f, 0.5f, 1.2f, true))
+    }
+
     @Test fun fitBoundsAccountForLetterboxing() {
         assertEquals(ReaderPanBounds(0f, 0f, 0f, 0f), readerPanBounds(300f, 600f, 1f, 1f, false))
         assertEquals(ReaderPanBounds(-150f, 150f, 0f, 0f), readerPanBounds(300f, 600f, 1f, 2f, false))

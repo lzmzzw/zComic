@@ -82,6 +82,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     var preferredMode by remember { mutableStateOf(preferences.getString("mode", "从右往左") ?: "从右往左") }
     var preferredFit by remember { mutableStateOf(preferences.getString("fit", "适应整页") ?: "适应整页") }
     var landscape by rememberSaveable { mutableStateOf(preferences.getBoolean("landscape", false)) }
+    var landscapeWidth by remember { mutableFloatStateOf(readerLandscapeWidth(preferences.getFloat("landscapeWidth", 2f / 3f))) }
     val landscapeReading = landscape || LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val mode = if (landscapeReading) "上下连续" else preferredMode
     val fit = if (landscapeReading) "适应宽度" else preferredFit
@@ -210,7 +211,26 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                     detectTapGestures { offset -> handleTap(offset.x, offset.y, size.width.toFloat(), size.height.toFloat()) }
                 }) {
                     items(count, key = { it }) { index ->
-                        ReaderImage(book!!, index, fit, Modifier.fillMaxWidth(), continuous = true)
+                        var beforeZoom by remember(record.id, index) { mutableStateOf<Pair<Int, Int>?>(null) }
+                        ReaderImage(book!!, index, fit, Modifier.fillMaxWidth(), continuous = true,
+                            landscapeWidth = landscapeWidth.takeIf { landscapeReading },
+                            onWidthChanged = { width ->
+                                beforeZoom?.let { (item, offset) ->
+                                    continuousState.requestScrollToItem(item, (offset * width / landscapeWidth).roundToInt())
+                                }
+                                landscapeWidth = width
+                                preferences.edit().putFloat("landscapeWidth", width).apply()
+                            },
+                            onZoomStart = {
+                                if (beforeZoom == null) beforeZoom = continuousState.firstVisibleItemIndex to continuousState.firstVisibleItemScrollOffset
+                            },
+                            onZoomReset = {
+                                beforeZoom?.let { (item, offset) ->
+                                    continuousState.requestScrollToItem(item, offset)
+                                    page = item
+                                }
+                                beforeZoom = null
+                            }, onWidthGestureFinished = { beforeZoom = null })
                     }
                 }
             }
@@ -280,7 +300,7 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
                 Switch(landscape, { landscape = it })
                 Text("横屏观看", Modifier.padding(start = 9.dp))
             }
-            if (landscapeReading) Text("横屏固定使用适应宽度、上下连续", fontSize = 12.sp)
+            if (landscapeReading) Text("横屏固定上下连续；双指调整页宽，屏幕内宽度自动保存，超宽放大后单击回到放大前位置", fontSize = 12.sp)
             Text("翻页方式")
             listOf("从右往左", "从左往右", "上下连续").forEach { value ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -302,7 +322,9 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
 
 @Composable
 private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modifier,
-    continuous: Boolean = false, preloaded: Bitmap? = null, onDecoded: (Bitmap) -> Unit = {}) {
+    continuous: Boolean = false, preloaded: Bitmap? = null, onDecoded: (Bitmap) -> Unit = {},
+    landscapeWidth: Float? = null, onWidthChanged: (Float) -> Unit = {}, onZoomStart: () -> Unit = {},
+    onZoomReset: () -> Unit = {}, onWidthGestureFinished: () -> Unit = {}) {
     var imageError by remember(book, page) { mutableStateOf(false) }
     val latestOnDecoded by rememberUpdatedState(onDecoded)
     // Preloaded pages render synchronously; never clear them in an asynchronous producer.
@@ -318,22 +340,34 @@ private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modif
         }
         decoded
     }
-    var scale by remember(book, page, fit, continuous) { mutableFloatStateOf(1f) }
-    var pan by remember(book, page, fit, continuous) { mutableStateOf(Offset.Zero) }
+    val widthAdjustable = landscapeWidth != null
+    var scale by remember(book, page, fit, continuous, widthAdjustable) { mutableFloatStateOf(1f) }
+    var pan by remember(book, page, fit, continuous, widthAdjustable) { mutableStateOf(Offset.Zero) }
+    var gestureWidth by remember(book, page, widthAdjustable) { mutableStateOf<Float?>(null) }
+    var gestureLayoutWidth by remember(book, page, widthAdjustable) { mutableStateOf<Float?>(null) }
+    val displayWidth = gestureWidth ?: landscapeWidth ?: 1f
+    val imageWidth = if (widthAdjustable) displayWidth.coerceAtMost(1f) else 1f
+    val layoutWidth = if (widthAdjustable) readerLandscapeLayoutWidth(displayWidth, gestureLayoutWidth) else 1f
+    val displayScale = if (widthAdjustable) displayWidth.coerceAtLeast(1f) else scale
+    val latestWidth by rememberUpdatedState(landscapeWidth)
+    val latestOnWidthChanged by rememberUpdatedState(onWidthChanged)
+    val latestOnZoomStart by rememberUpdatedState(onZoomStart)
+    val latestOnZoomReset by rememberUpdatedState(onZoomReset)
+    val latestOnWidthGestureFinished by rememberUpdatedState(onWidthGestureFinished)
     val latestBitmap by rememberUpdatedState(bitmap)
     var visibleArea by remember(book, page, fit, continuous) { mutableStateOf<Rect?>(null) }
     val ratio = book.pageRatios.getOrNull(page) ?: 0.72f
-    Box((if (continuous) modifier.aspectRatio(ratio) else modifier).clipToBounds()
+    Box((if (continuous) modifier.aspectRatio(ratio / layoutWidth) else modifier).clipToBounds()
         .onGloballyPositioned { coordinates ->
             val bounds = coordinates.boundsInWindow()
             val origin = coordinates.positionInWindow()
             visibleArea = Rect(bounds.left - origin.x, bounds.top - origin.y,
                 bounds.right - origin.x, bounds.bottom - origin.y)
         }
-        .pointerInput(book, page, fit, continuous) {
+        .pointerInput(book, page, fit, continuous, widthAdjustable) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
-                val startedZoomed = scale > 1f
+                val startedZoomed = if (widthAdjustable) (gestureWidth ?: latestWidth ?: 1f) > 1f else scale > 1f
                 var transforming = startedZoomed
                 var pinched = false
                 var moved = false
@@ -341,6 +375,10 @@ private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modif
                 do {
                     val event = awaitPointerEvent()
                     if (event.changes.count { it.pressed } >= 2) {
+                        if (!pinched && widthAdjustable) {
+                            gestureLayoutWidth = (gestureWidth ?: latestWidth ?: 2f / 3f).coerceAtMost(1f)
+                            if (!startedZoomed) latestOnZoomStart()
+                        }
                         pinched = true
                         transforming = true
                     }
@@ -348,23 +386,39 @@ private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modif
                         moved = true
                     }
                     if (transforming) {
-                        scale = (scale * event.calculateZoom()).coerceIn(1f, 5f)
+                        val zoom = event.calculateZoom()
+                        val currentScale = if (widthAdjustable) {
+                            gestureWidth = readerLandscapeGestureWidth(gestureWidth ?: latestWidth ?: 2f / 3f, zoom)
+                            gestureWidth!!.coerceAtLeast(1f)
+                        } else {
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            scale
+                        }
                         val delta = event.calculatePan()
                         val imageRatio = latestBitmap?.let { it.width.toFloat() / it.height } ?: ratio
                         val visible = visibleArea?.takeIf { it.width > 0f && it.height > 0f }
                             ?: Rect(0f, 0f, size.width.toFloat(), size.height.toFloat())
-                        val bounds = readerPanBounds(size.width.toFloat(), size.height.toFloat(), imageRatio, scale,
-                            fit == "适应宽度", visible.left, visible.top, visible.right, visible.bottom)
+                        val bounds = readerPanBounds(size.width.toFloat(), size.height.toFloat(), imageRatio, currentScale,
+                            fit == "适应宽度", visible.left, visible.top, visible.right, visible.bottom,
+                            widthFraction = if (widthAdjustable) (gestureWidth ?: latestWidth ?: 1f).coerceAtMost(1f) else 1f)
                         pan = Offset((pan.x + delta.x).coerceIn(bounds.minX, bounds.maxX),
                             (pan.y + delta.y).coerceIn(bounds.minY, bounds.maxY))
-                        if (scale == 1f) pan = Offset.Zero
+                        if (currentScale == 1f) pan = Offset.Zero
                         event.changes.forEach { it.consume() }
                     }
                 } while (event.changes.any { it.pressed })
                 if (startedZoomed && !pinched && !moved) {
                     scale = 1f
+                    gestureWidth = null
                     pan = Offset.Zero
+                    if (widthAdjustable) latestOnZoomReset()
+                } else if (widthAdjustable && pinched && gestureWidth != null && gestureWidth!! <= 1f) {
+                    latestOnWidthChanged(readerLandscapeWidth(gestureWidth!!))
+                    gestureWidth = null
+                    pan = Offset.Zero
+                    latestOnWidthGestureFinished()
                 }
+                gestureLayoutWidth = null
             }
         }, contentAlignment = Alignment.Center) {
         if (bitmap == null) {
@@ -372,8 +426,8 @@ private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modif
             else CircularProgressIndicator(Modifier.size(28.dp))
         }
         bitmap?.let { image ->
-            Image(image.asImageBitmap(), contentDescription = "第 ${page + 1} 页", modifier = Modifier.fillMaxSize()
-                .graphicsLayer(scaleX = scale, scaleY = scale, translationX = pan.x, translationY = pan.y),
+            Image(image.asImageBitmap(), contentDescription = "第 ${page + 1} 页", modifier = Modifier.fillMaxWidth(imageWidth).fillMaxHeight()
+                .graphicsLayer(scaleX = displayScale, scaleY = displayScale, translationX = pan.x, translationY = pan.y),
                 contentScale = if (fit == "适应宽度") ContentScale.FillWidth else ContentScale.Fit)
         }
     }
