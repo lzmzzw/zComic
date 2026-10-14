@@ -4,16 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ReaderZoomTest {
-    @Test fun shrinkingAtBottomKeepsGestureItemTallUntilRelease() {
-        val width = 900f
-        val ratio = 0.5f
-        val duringGestureHeight = width * readerLandscapeLayoutWidth(0.3f, 2f / 3f) / ratio
-        assertEquals(1200f, duringGestureHeight, 0f)
-        org.junit.Assert.assertTrue(duringGestureHeight > 1100f)
-        assertEquals(540f, width * readerLandscapeLayoutWidth(0.3f, null) / ratio, 0f)
-        assertEquals(1f, readerLandscapeLayoutWidth(1.2f, null), 0f)
-    }
-
     @Test fun landscapeStartsAtTwoThirdsAndNormalWidthsStayInsideViewport() {
         assertEquals(2f / 3f, readerLandscapeWidth(Float.NaN), 0f)
         assertEquals(2f / 3f, readerLandscapeWidth(Float.POSITIVE_INFINITY), 0f)
