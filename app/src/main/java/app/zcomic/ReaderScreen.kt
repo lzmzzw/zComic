@@ -1,6 +1,8 @@
 package app.zcomic
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.view.WindowInsets as AndroidWindowInsets
@@ -17,6 +19,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,6 +31,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
@@ -35,7 +40,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.zcomic.data.ComicBook
@@ -70,8 +79,12 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     var page by rememberSaveable(record.id) { mutableIntStateOf(record.page.coerceAtLeast(0)) }
     var toolbar by rememberSaveable { mutableStateOf(false) }
     var options by remember { mutableStateOf(false) }
-    var mode by remember { mutableStateOf(preferences.getString("mode", "从右往左") ?: "从右往左") }
-    var fit by remember { mutableStateOf(preferences.getString("fit", "适应整页") ?: "适应整页") }
+    var preferredMode by remember { mutableStateOf(preferences.getString("mode", "从右往左") ?: "从右往左") }
+    var preferredFit by remember { mutableStateOf(preferences.getString("fit", "适应整页") ?: "适应整页") }
+    var landscape by rememberSaveable { mutableStateOf(preferences.getBoolean("landscape", false)) }
+    val landscapeReading = landscape || LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val mode = if (landscapeReading) "上下连续" else preferredMode
+    val fit = if (landscapeReading) "适应宽度" else preferredFit
     var dark by remember { mutableStateOf(preferences.getBoolean("dark", true)) }
     val continuousState = rememberLazyListState(initialFirstVisibleItemIndex = page)
     val scope = rememberCoroutineScope()
@@ -82,9 +95,14 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     var sliderPage by remember { mutableStateOf<Float?>(null) }
     var turnJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val latestOnPageChanged by rememberUpdatedState(onPageChanged)
-    LaunchedEffect(mode, fit, dark) {
-        preferences.edit().putString("mode", mode).putString("fit", fit).putBoolean("dark", dark)
+    LaunchedEffect(preferredMode, preferredFit, dark, landscape) {
+        preferences.edit().putString("mode", preferredMode).putString("fit", preferredFit).putBoolean("dark", dark)
+            .putBoolean("landscape", landscape)
             .apply()
+    }
+    LaunchedEffect(activity, landscape) {
+        activity?.requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
     val background = if (dark) Color.Black else Color(0xFFF4F3F1)
     LaunchedEffect(record.id, record.uri) {
@@ -106,6 +124,9 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
         activity?.window?.insetsController?.hide(AndroidWindowInsets.Type.statusBars() or AndroidWindowInsets.Type.navigationBars())
         activity?.window?.insetsController?.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         onDispose {
+            if (activity?.isChangingConfigurations == false) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
             activity?.window?.insetsController?.show(AndroidWindowInsets.Type.statusBars() or AndroidWindowInsets.Type.navigationBars())
         }
     }
@@ -255,17 +276,22 @@ fun ReaderScreen(record: VolumeRecord, onPageChanged: (String, Int, Int) -> Unit
     }
     if (options) AlertDialog(onDismissRequest = { options = false }, title = { Text("阅读设置") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(landscape, { landscape = it })
+                Text("横屏观看", Modifier.padding(start = 9.dp))
+            }
+            if (landscapeReading) Text("横屏固定使用适应宽度、上下连续", fontSize = 12.sp)
             Text("翻页方式")
             listOf("从右往左", "从左往右", "上下连续").forEach { value ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = mode == value, onClick = { mode = value })
+                    RadioButton(selected = mode == value, enabled = !landscapeReading, onClick = { preferredMode = value })
                     Text(value, Modifier.padding(start = 5.dp))
                 }
             }
             HorizontalDivider()
             listOf("适应整页", "适应宽度").forEach { value ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = fit == value, onClick = { fit = value })
+                    RadioButton(selected = fit == value, enabled = !landscapeReading, onClick = { preferredFit = value })
                     Text(value, Modifier.padding(start = 5.dp))
                 }
             }
@@ -292,30 +318,63 @@ private fun ReaderImage(book: ComicBook, page: Int, fit: String, modifier: Modif
         }
         decoded
     }
-    var scale by remember(page) { mutableFloatStateOf(1f) }
+    var scale by remember(book, page, fit, continuous) { mutableFloatStateOf(1f) }
+    var pan by remember(book, page, fit, continuous) { mutableStateOf(Offset.Zero) }
+    val latestBitmap by rememberUpdatedState(bitmap)
+    var visibleArea by remember(book, page, fit, continuous) { mutableStateOf<Rect?>(null) }
     val ratio = book.pageRatios.getOrNull(page) ?: 0.72f
-    Box(if (continuous) modifier.aspectRatio(ratio) else modifier, contentAlignment = Alignment.Center) {
+    Box((if (continuous) modifier.aspectRatio(ratio) else modifier).clipToBounds()
+        .onGloballyPositioned { coordinates ->
+            val bounds = coordinates.boundsInWindow()
+            val origin = coordinates.positionInWindow()
+            visibleArea = Rect(bounds.left - origin.x, bounds.top - origin.y,
+                bounds.right - origin.x, bounds.bottom - origin.y)
+        }
+        .pointerInput(book, page, fit, continuous) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val startedZoomed = scale > 1f
+                var transforming = startedZoomed
+                var pinched = false
+                var moved = false
+                if (startedZoomed) down.consume()
+                do {
+                    val event = awaitPointerEvent()
+                    if (event.changes.count { it.pressed } >= 2) {
+                        pinched = true
+                        transforming = true
+                    }
+                    if (event.changes.any { (it.position - down.position).getDistance() > viewConfiguration.touchSlop }) {
+                        moved = true
+                    }
+                    if (transforming) {
+                        scale = (scale * event.calculateZoom()).coerceIn(1f, 5f)
+                        val delta = event.calculatePan()
+                        val imageRatio = latestBitmap?.let { it.width.toFloat() / it.height } ?: ratio
+                        val visible = visibleArea?.takeIf { it.width > 0f && it.height > 0f }
+                            ?: Rect(0f, 0f, size.width.toFloat(), size.height.toFloat())
+                        val bounds = readerPanBounds(size.width.toFloat(), size.height.toFloat(), imageRatio, scale,
+                            fit == "适应宽度", visible.left, visible.top, visible.right, visible.bottom)
+                        pan = Offset((pan.x + delta.x).coerceIn(bounds.minX, bounds.maxX),
+                            (pan.y + delta.y).coerceIn(bounds.minY, bounds.maxY))
+                        if (scale == 1f) pan = Offset.Zero
+                        event.changes.forEach { it.consume() }
+                    }
+                } while (event.changes.any { it.pressed })
+                if (startedZoomed && !pinched && !moved) {
+                    scale = 1f
+                    pan = Offset.Zero
+                }
+            }
+        }, contentAlignment = Alignment.Center) {
         if (bitmap == null) {
             if (imageError) Text("第 ${page + 1} 页无法读取", color = MaterialTheme.colorScheme.error)
             else CircularProgressIndicator(Modifier.size(28.dp))
         }
         bitmap?.let { image ->
             Image(image.asImageBitmap(), contentDescription = "第 ${page + 1} 页", modifier = Modifier.fillMaxSize()
-                .graphicsLayer(scaleX = scale, scaleY = scale)
-                .pointerInput(page) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        var zooming = false
-                        do {
-                            val event = awaitPointerEvent()
-                            if (event.changes.count { it.pressed } >= 2) {
-                                zooming = true
-                                scale = (scale * event.calculateZoom()).coerceIn(1f, 5f)
-                            }
-                            if (zooming) event.changes.forEach { it.consume() }
-                        } while (event.changes.any { it.pressed })
-                    }
-                }, contentScale = if (fit == "适应宽度") ContentScale.FillWidth else ContentScale.Fit)
+                .graphicsLayer(scaleX = scale, scaleY = scale, translationX = pan.x, translationY = pan.y),
+                contentScale = if (fit == "适应宽度") ContentScale.FillWidth else ContentScale.Fit)
         }
     }
 }
