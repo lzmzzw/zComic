@@ -35,7 +35,7 @@ enum class ComicSort(val label: String, val order: String) {
 
 class KmoeClient(private val root: String = "https://kxo.moe") {
     private val rootUrl = root.toHttpUrl()
-    private val userAgent = "Mozilla/5.0 zComic/1.0.0"
+    private val userAgent = "Mozilla/5.0 zComic/1.0.1"
     private val cookies = mutableListOf<Cookie>()
     private val sessionLock = Any()
     private var generation = 0L
@@ -142,11 +142,15 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
         }
     }
 
-    private suspend fun html(url: String): String {
+    private fun apiFrom(method: String, pageUrl: String): String =
+        "KJS/1.0.3 Brower(1) $method ${pageUrl.toHttpUrl().encodedPath}"
+
+    private suspend fun html(url: String, pageUrl: String? = null): String {
         val target = url.toHttpUrl()
         require(target.scheme == rootUrl.scheme && target.host == rootUrl.host && target.port == rootUrl.port) { "不支持的站点地址" }
         return request(Request.Builder().url(target).header("User-Agent", userAgent)
-            .header("Referer", "$root/").build()) {
+            .header("Referer", pageUrl ?: "$root/")
+            .apply { if (pageUrl != null) header("X-KAPI-FROM", apiFrom("GET", pageUrl)) }.build()) {
             if (!it.isSuccessful) throw IOException("网站请求失败 (${it.code})")
             if (it.request.url.encodedPath.endsWith("login.php")) throw IOException("登录状态已失效")
             it.body?.string().orEmpty()
@@ -179,9 +183,9 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
 
     suspend fun detail(comic: OnlineComic): ComicDetail = withContext(Dispatchers.IO) {
         val source = html(comic.detailUrl)
-        val hash = Regex("data_book\\(\\s*\"([a-zA-Z0-9]+)\"").find(source)?.groupValues?.get(1)
+        val hash = Regex("(?:Kmoe\\.book|data_book)\\s*\\(\\s*['\"]([a-zA-Z0-9]+)['\"]").find(source)?.groupValues?.get(1)
             ?: error("网站详情接口已改变")
-        parseDetail(comic, source, html("$root/data_book.php?h=$hash"))
+        parseDetail(comic, source, html("$root/data_book.php?h=$hash", comic.detailUrl))
     }
 
     internal fun parseDetail(comic: OnlineComic, source: String, volumeJson: String): ComicDetail {
@@ -220,10 +224,17 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
     suspend fun <T> withDownload(url: String, from: Long = 0, validator: String = "",
         block: suspend (Response) -> T): T {
         try {
+            val sourceUrl = parseUrl(url)
+            val isResolver = sourceUrl.scheme == rootUrl.scheme && sourceUrl.host == rootUrl.host &&
+                sourceUrl.port == rootUrl.port && sourceUrl.encodedPath == "/getdownurl.php"
+            val bookId = if (isResolver) sourceUrl.queryParameter("b") else
+                sourceUrl.encodedPath.takeIf { it.startsWith("/dl/") }?.split('/')?.getOrNull(2)
+            val pageUrl = bookId?.takeIf { it.matches(Regex("\\d+")) }?.let { "$root/c/$it.htm" } ?: "$root/"
             val target = withContext(Dispatchers.IO) {
-                if (url.startsWith("$root/getdownurl.php?")) {
+                if (isResolver) {
                     val result = request(Request.Builder().url(url).header("User-Agent", userAgent)
-                        .header("Referer", "$root/").build()) { response ->
+                        .header("Referer", pageUrl)
+                        .header("X-KAPI-FROM", apiFrom("GET", pageUrl)).build()) { response ->
                         if (!response.isSuccessful) throw DownloadHttpException(response.code, "下载地址获取失败 (${response.code})")
                         if (response.request.url.encodedPath.endsWith("login.php"))
                             throw DownloadHttpException(401, "登录状态已失效")
@@ -232,11 +243,12 @@ class KmoeClient(private val root: String = "https://kxo.moe") {
                     val resolved = result.optString("url")
                     if (resolved.isBlank()) throw IOException("网站未提供下载地址，可能需要人工验证或权限不足")
                     parseUrl(resolved)
-                } else parseUrl(url)
+                } else sourceUrl
             }
             require(target.isHttps || (rootUrl.scheme == "http" && target.host == rootUrl.host && target.port == rootUrl.port)) { "下载链接必须使用 HTTPS" }
-            val downloadRequest = Request.Builder().url(target).header("Referer", "$root/")
+            val downloadRequest = Request.Builder().url(target).header("Referer", pageUrl)
                 .header("User-Agent", userAgent)
+                .header("X-KAPI-FROM", apiFrom("FETCH", pageUrl))
                 .header("Accept-Encoding", "identity")
                 .apply {
                     if (from > 0 && validator.isNotBlank()) {

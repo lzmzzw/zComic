@@ -69,6 +69,41 @@ class KmoeClientTest {
         }
     }
 
+    @Test fun detailSupportsModuleAndLegacyCallsWithCurrentApiHeaders() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val root = server.url("/").toString().removeSuffix("/")
+            val comic = OnlineComic("a123", "测试漫画", "", "$root/c/a123.htm")
+            val client = KmoeClient(root)
+            for (call in listOf("Kmoe.book ( 'hash123' )", "data_book(\"hash123\")")) {
+                server.enqueue(MockResponse().setBody("""<script>var bookid = "40210"; $call;</script>"""))
+                server.enqueue(MockResponse().setBody("""{"msgid":0,"voldata":[["99",0,0,"卷",1,"卷 01",0,248,0,0,0,172.3]]}"""))
+
+                val detail = client.detail(comic)
+
+                assertEquals("a123-99", detail.volumes.single().id)
+                assertEquals("/c/a123.htm", server.takeRequest().path)
+                val dataRequest = server.takeRequest()
+                assertEquals("/data_book.php?h=hash123", dataRequest.path)
+                assertEquals(comic.detailUrl, dataRequest.getHeader("Referer"))
+                assertEquals("KJS/1.0.3 Brower(1) GET /c/a123.htm", dataRequest.getHeader("X-KAPI-FROM"))
+            }
+        }
+    }
+
+    @Test fun detailRejectsUnknownInterfaceBeforeRequestingVolumeData() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setBody("<script>changedInterface();</script>"))
+            val root = server.url("/").toString().removeSuffix("/")
+            val error = runCatching {
+                KmoeClient(root).detail(OnlineComic("a123", "测试漫画", "", "$root/c/a123.htm"))
+            }.exceptionOrNull()
+            assertEquals("网站详情接口已改变", error?.message)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
     @Test fun downloadResolvesSignedEpubUrlAndUsesBrowserHeaders() = runBlocking {
         MockWebServer().use { server ->
             server.start()
@@ -84,11 +119,14 @@ class KmoeClientTest {
 
             val resolve = server.takeRequest()
             assertEquals("/getdownurl.php?b=34941&v=1&mobi=2&json=1&vip=0", resolve.path)
-            assertEquals("Mozilla/5.0 zComic/1.0.0", resolve.getHeader("User-Agent"))
+            assertEquals("Mozilla/5.0 zComic/1.0.1", resolve.getHeader("User-Agent"))
+            assertEquals("KJS/1.0.3 Brower(1) GET /c/34941.htm", resolve.getHeader("X-KAPI-FROM"))
+            assertEquals("$root/c/34941.htm", resolve.getHeader("Referer"))
             val file = server.takeRequest()
             assertEquals("/volume.epub?sign=test", file.path)
-            assertEquals("Mozilla/5.0 zComic/1.0.0", file.getHeader("User-Agent"))
-            assertEquals("$root/", file.getHeader("Referer"))
+            assertEquals("Mozilla/5.0 zComic/1.0.1", file.getHeader("User-Agent"))
+            assertEquals("$root/c/34941.htm", file.getHeader("Referer"))
+            assertEquals("KJS/1.0.3 Brower(1) FETCH /c/34941.htm", file.getHeader("X-KAPI-FROM"))
             assertEquals("identity", file.getHeader("Accept-Encoding"))
         }
     }
